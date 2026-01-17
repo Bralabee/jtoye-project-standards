@@ -1,0 +1,191 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Full Project Audit v2.1
+# =============================================================================
+# Runs all jtoye-* checks in sequence for comprehensive project validation.
+#
+# Usage: jtoye-audit [project-root] [--ci] [--quick] [--offline]
+#   --ci      CI mode (exit on first required failure)
+#   --quick   Skip optional checks
+#   --offline Skip checks requiring network access
+# =============================================================================
+
+# Note: set -euo pipefail is set in jtoye-common.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+# Parse arguments
+CI_MODE=false
+QUICK_MODE=false
+PROJECT_ARG=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --ci) CI_MODE=true; shift ;;
+        --quick) QUICK_MODE=true; shift ;;
+        --offline) export JTOYE_OFFLINE=true; shift ;;
+        -*) shift ;;  # Skip unknown flags
+        *) PROJECT_ARG="$1"; shift ;;
+    esac
+done
+
+PROJECT_ROOT="$(detect_project_root "$PROJECT_ARG")" || exit 1
+PROJECT_NAME=$(basename "$PROJECT_ROOT")
+cd -- "$PROJECT_ROOT" || exit 1
+
+# Validate project has content
+validate_project_has_content "$PROJECT_ROOT" || exit 1
+
+# Track results
+declare -A RESULTS
+TOTAL_PASSED=0
+TOTAL_FAILED=0
+
+# =============================================================================
+# Banner
+# =============================================================================
+echo ""
+echo -e "${MAGENTA}╔═══════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${MAGENTA}║           J'TOYE DIGITAL - FULL PROJECT AUDIT v2.1           ║${NC}"
+echo -e "${MAGENTA}╠═══════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${MAGENTA}║  Project: $(printf '%-49s' "$PROJECT_NAME")║${NC}"
+echo -e "${MAGENTA}║  Date:    $(printf '%-49s' "$(date '+%Y-%m-%d %H:%M:%S')")║${NC}"
+echo -e "${MAGENTA}║  Mode:    $(printf '%-49s' "$([ "$CI_MODE" = true ] && echo 'CI' || echo 'Interactive')")║${NC}"
+echo -e "${MAGENTA}╚═══════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+# =============================================================================
+# Run Check Function
+# =============================================================================
+run_check() {
+    local name="$1"
+    local script="$2"
+    local level="$3"  # required, recommended, optional
+    
+    # Skip optional checks in quick mode
+    if [[ "$QUICK_MODE" = true ]] && [[ "$level" == "optional" ]]; then
+        RESULTS["$name"]="⊘ SKIP"
+        return 0
+    fi
+    
+    # Skip network-dependent checks in offline mode
+    if [[ "${JTOYE_OFFLINE:-false}" == "true" ]]; then
+        local net_checks="Dependencies"
+        if [[ "$net_checks" == *"$name"* ]]; then
+            RESULTS["$name"]="⊘ OFFLINE"
+            echo -e "${YELLOW}  Skipping $name (offline mode)${NC}"
+            return 0
+        fi
+    fi
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}  [$level] $name${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    if [[ -f "$script" ]] && [[ -x "$script" ]]; then
+        # Script is already executable (should be set at install time, not runtime)
+        if run_with_timeout "$JTOYE_COMMAND_TIMEOUT" "$script" "$PROJECT_ROOT"; then
+            RESULTS["$name"]="✓ PASS"
+            inc TOTAL_PASSED
+            echo -e "${GREEN}  ══► $name: PASSED${NC}"
+        else
+            local exit_code=$?
+            if [[ $exit_code -eq 124 ]]; then
+                RESULTS["$name"]="⊘ TIMEOUT"
+                echo -e "${YELLOW}  ══► $name: TIMEOUT (>${JTOYE_COMMAND_TIMEOUT}s)${NC}"
+            else
+                RESULTS["$name"]="✗ FAIL"
+                inc TOTAL_FAILED
+                echo -e "${RED}  ══► $name: FAILED${NC}"
+            fi
+            
+            # CI mode: stop on required failures
+            if [[ "$CI_MODE" = true ]] && [[ "$level" == "required" ]] && [[ $exit_code -ne 124 ]]; then
+                echo -e "${RED}  CI mode: Stopping on required check failure${NC}"
+                exit 1
+            fi
+        fi
+    elif [[ -f "$script" ]]; then
+        RESULTS["$name"]="⊘ NOT EXEC"
+        echo -e "${YELLOW}  Script not executable: $script (run: chmod +x)${NC}"
+    else
+        RESULTS["$name"]="⊘ MISSING"
+        echo -e "${YELLOW}  Script not found: $script${NC}"
+    fi
+    
+    echo ""
+}
+
+# =============================================================================
+# Run All Checks
+# =============================================================================
+
+# Required checks (fail the audit if these fail)
+run_check "Security Scan"       "$SCRIPT_DIR/jtoye-security"       "required"
+run_check "Code Quality"        "$SCRIPT_DIR/jtoye-quality"        "required"
+
+# Recommended checks
+run_check "Architecture"        "$SCRIPT_DIR/jtoye-architecture"   "recommended"
+run_check "Test Coverage"       "$SCRIPT_DIR/jtoye-coverage"       "recommended"
+run_check "Documentation"       "$SCRIPT_DIR/jtoye-docs"           "recommended"
+run_check "API Contract"        "$SCRIPT_DIR/jtoye-api"            "recommended"
+run_check "Dependencies"        "$SCRIPT_DIR/jtoye-deps"           "recommended"
+run_check "Database Schema"     "$SCRIPT_DIR/jtoye-database"       "recommended"
+run_check "Conda Environment"   "$SCRIPT_DIR/jtoye-conda"          "recommended"
+run_check "Makefile"            "$SCRIPT_DIR/jtoye-makefile"       "recommended"
+
+# Optional checks (nice to have)
+run_check "Performance"         "$SCRIPT_DIR/jtoye-performance"    "optional"
+run_check "UI/UX"               "$SCRIPT_DIR/jtoye-uiux"           "optional"
+run_check "Monitoring"          "$SCRIPT_DIR/jtoye-monitoring"     "optional"
+
+# =============================================================================
+# Summary Report
+# =============================================================================
+echo ""
+echo -e "${MAGENTA}╔═══════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${MAGENTA}║                     AUDIT SUMMARY                             ║${NC}"
+echo -e "${MAGENTA}╠═══════════════════════════════════════════════════════════════╣${NC}"
+
+CHECKS=("Security Scan" "Code Quality" "Architecture" "Test Coverage" "Documentation" "API Contract" "Dependencies" "Database Schema" "Conda Environment" "Makefile" "Performance" "UI/UX" "Monitoring")
+
+for check in "${CHECKS[@]}"; do
+    result="${RESULTS[$check]:-⊘ SKIP}"
+    
+    if [[ "$result" == *"PASS"* ]]; then
+        echo -e "${MAGENTA}║${NC}  ${GREEN}$result${NC}  $(printf '%-46s' "$check")${MAGENTA}║${NC}"
+    elif [[ "$result" == *"FAIL"* ]]; then
+        echo -e "${MAGENTA}║${NC}  ${RED}$result${NC}  $(printf '%-46s' "$check")${MAGENTA}║${NC}"
+    else
+        echo -e "${MAGENTA}║${NC}  ${YELLOW}$result${NC}  $(printf '%-46s' "$check")${MAGENTA}║${NC}"
+    fi
+done
+
+echo -e "${MAGENTA}╠═══════════════════════════════════════════════════════════════╣${NC}"
+
+if [[ $TOTAL_FAILED -eq 0 ]]; then
+    echo -e "${MAGENTA}║${NC}  ${GREEN}✓ ALL CHECKS PASSED ($TOTAL_PASSED passed)${NC}$(printf '%*s' 27 '')${MAGENTA}║${NC}"
+else
+    echo -e "${MAGENTA}║${NC}  ${RED}✗ $TOTAL_FAILED CHECK(S) FAILED${NC} ($TOTAL_PASSED passed)$(printf '%*s' 25 '')${MAGENTA}║${NC}"
+fi
+
+echo -e "${MAGENTA}╚═══════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+# =============================================================================
+# Recommendations
+# =============================================================================
+if [[ $TOTAL_FAILED -gt 0 ]]; then
+    echo -e "${YELLOW}Recommended actions:${NC}"
+    echo "  1. Review failed checks above"
+    echo "  2. Run individual checks for details:"
+    echo "     ./scripts/jtoye-security"
+    echo "     ./scripts/jtoye-quality"
+    echo "  3. Re-run audit: ./scripts/jtoye-audit"
+    echo ""
+fi
+
+# Exit code
+[[ $TOTAL_FAILED -gt 0 ]] && exit 1
+exit 0

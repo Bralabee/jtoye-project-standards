@@ -1,0 +1,290 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Documentation Validator v2.1
+# =============================================================================
+# Validates documentation quality, completeness, and consistency.
+#
+# Usage: jtoye-docs [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "Documentation Validator" "v2.0"
+
+# =============================================================================
+# 1. README Analysis
+# =============================================================================
+jtoye_section "1" "README Analysis"
+
+if [[ -f "README.md" ]]; then
+    jtoye_pass "README.md exists"
+    
+    # Check for minimum sections
+    REQUIRED_SECTIONS=("Installation" "Usage")
+    RECOMMENDED_SECTIONS=("Contributing" "License" "Requirements" "Getting Started")
+    
+    for section in "${REQUIRED_SECTIONS[@]}"; do
+        if grep -qiE "^#+\s*$section" README.md; then
+            jtoye_pass "Has '$section' section"
+        else
+            jtoye_warn "Missing '$section' section"
+            inc WARNINGS
+        fi
+    done
+    
+    for section in "${RECOMMENDED_SECTIONS[@]}"; do
+        if grep -qiE "^#+\s*$section" README.md; then
+            jtoye_pass "Has '$section' section"
+        fi
+    done
+    
+    # Check for code examples
+    if grep -q '```' README.md; then
+        code_blocks=$(grep -c '```' README.md)
+        code_blocks=$((code_blocks / 2))
+        jtoye_pass "Contains $code_blocks code example(s)"
+    else
+        jtoye_info "Consider adding code examples to README"
+    fi
+    
+    # Check for broken relative links
+    broken_links=0
+    while IFS= read -r link; do
+        # Extract path from markdown link
+        path=$(echo "$link" | sed -E 's/.*\(([^)]+)\).*/\1/' | sed 's/#.*//')
+        
+        # Skip URLs and anchors
+        [[ "$path" =~ ^https?:// ]] && continue
+        [[ "$path" =~ ^# ]] && continue
+        [[ -z "$path" ]] && continue
+        
+        if [[ ! -e "$path" ]]; then
+            jtoye_warn "Broken link in README: $path"
+            inc broken_links
+        fi
+    done < <(grep -oE '\[.*?\]\([^)]+\)' README.md 2>/dev/null)
+    
+    if [[ $broken_links -eq 0 ]]; then
+        jtoye_pass "No broken relative links detected"
+    else
+        inc WARNINGS
+    fi
+    
+else
+    jtoye_fail "README.md not found"
+    inc ERRORS
+fi
+
+# =============================================================================
+# 2. Changelog Check
+# =============================================================================
+jtoye_section "2" "Changelog"
+
+if [[ -f "CHANGELOG.md" ]]; then
+    jtoye_pass "CHANGELOG.md exists"
+    
+    # Check for proper format (Keep a Changelog style)
+    if grep -qE "^## \[" CHANGELOG.md || grep -qE "^## v?[0-9]" CHANGELOG.md; then
+        jtoye_pass "Uses versioned sections"
+    else
+        jtoye_info "Consider using Keep a Changelog format"
+    fi
+    
+    # Check for unreleased section
+    if grep -qi "unreleased" CHANGELOG.md; then
+        jtoye_pass "Has Unreleased section"
+    fi
+else
+    jtoye_info "No CHANGELOG.md (recommended for versioned projects)"
+fi
+
+# =============================================================================
+# 3. API Documentation
+# =============================================================================
+jtoye_section "3" "API Documentation"
+
+API_DOCS_FOUND=false
+
+# Check for common API doc locations
+for api_doc in "docs/API.md" "docs/api.md" "docs/API_REFERENCE.md" "API.md" "openapi.yaml" "openapi.json" "swagger.yaml" "swagger.json"; do
+    if [[ -f "$api_doc" ]]; then
+        jtoye_pass "API documentation: $api_doc"
+        API_DOCS_FOUND=true
+    fi
+done
+
+# Check for JSDoc/GoDoc/Python docstrings
+if [[ -d "." ]]; then
+    # Go: Check for doc.go files
+    doc_go=$(find . -name "doc.go" ! -path "./vendor/*" ! -path "./.git/*" 2>/dev/null | wc -l)
+    if [[ $doc_go -gt 0 ]]; then
+        jtoye_pass "Found $doc_go doc.go file(s)"
+        API_DOCS_FOUND=true
+    fi
+    
+    # Python: Check for documented functions
+    if [[ -f "requirements.txt" ]] || [[ -f "pyproject.toml" ]]; then
+        docstrings=$(grep -r $JTOYE_GREP_EXCLUDE '"""' --include="*.py" 2>/dev/null | wc -l)
+        if [[ $docstrings -gt 10 ]]; then
+            jtoye_pass "Python docstrings present (~$((docstrings/2)) documented items)"
+            API_DOCS_FOUND=true
+        fi
+    fi
+fi
+
+if [[ "$API_DOCS_FOUND" = false ]]; then
+    jtoye_info "No API documentation found"
+fi
+
+# =============================================================================
+# 4. Code Comments Quality
+# =============================================================================
+jtoye_section "4" "Code Comments"
+
+# Count TODO/FIXME/HACK comments
+TODOS=0
+FIXMES=0
+HACKS=0
+
+TODOS=$(grep -r $JTOYE_GREP_EXCLUDE -c "TODO" --include="*.go" --include="*.py" --include="*.ts" --include="*.js" --include="*.tsx" --include="*.jsx" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+FIXMES=$(grep -r $JTOYE_GREP_EXCLUDE -c "FIXME" --include="*.go" --include="*.py" --include="*.ts" --include="*.js" --include="*.tsx" --include="*.jsx" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+HACKS=$(grep -r $JTOYE_GREP_EXCLUDE -c "HACK" --include="*.go" --include="*.py" --include="*.ts" --include="*.js" --include="*.tsx" --include="*.jsx" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+
+if [[ $TODOS -gt 0 ]]; then
+    jtoye_info "Found $TODOS TODO comment(s)"
+fi
+if [[ $FIXMES -gt 0 ]]; then
+    jtoye_warn "Found $FIXMES FIXME comment(s) - these need attention"
+    inc WARNINGS
+fi
+if [[ $HACKS -gt 0 ]]; then
+    jtoye_warn "Found $HACKS HACK comment(s) - technical debt"
+    inc WARNINGS
+fi
+
+if [[ $TODOS -eq 0 ]] && [[ $FIXMES -eq 0 ]] && [[ $HACKS -eq 0 ]]; then
+    jtoye_pass "No pending TODO/FIXME/HACK comments"
+fi
+
+# =============================================================================
+# 5. Configuration Documentation
+# =============================================================================
+jtoye_section "5" "Configuration Documentation"
+
+# Check for environment documentation
+if [[ -f ".env.example" ]] || [[ -f ".env.sample" ]] || [[ -f ".env.template" ]]; then
+    jtoye_pass "Environment template file exists"
+    
+    # Check if documented
+    env_template=$(ls .env.example .env.sample .env.template 2>/dev/null | head -1)
+    if [[ -n "$env_template" ]]; then
+        commented_vars=$(grep -c "^#" "$env_template" 2>/dev/null || echo 0)
+        total_vars=$(grep -c "^[A-Z]" "$env_template" 2>/dev/null || echo 0)
+        
+        if [[ $total_vars -gt 0 ]]; then
+            if [[ $commented_vars -ge $((total_vars / 2)) ]]; then
+                jtoye_pass "Environment variables are documented"
+            else
+                jtoye_info "Consider adding comments to environment template"
+            fi
+        fi
+    fi
+else
+    if [[ -f ".env" ]]; then
+        jtoye_warn "No .env.example - document environment requirements"
+        inc WARNINGS
+    fi
+fi
+
+# Check for docker documentation
+if [[ -f "docker-compose.yml" ]]; then
+    if [[ -f "docs/DOCKER.md" ]] || grep -q "docker" README.md; then
+        jtoye_pass "Docker usage is documented"
+    else
+        jtoye_info "Consider documenting Docker setup"
+    fi
+fi
+
+# =============================================================================
+# 6. Docs Directory
+# =============================================================================
+jtoye_section "6" "Documentation Directory"
+
+if [[ -d "docs" ]]; then
+    doc_count=$(find docs -name "*.md" 2>/dev/null | wc -l)
+    jtoye_pass "docs/ directory contains $doc_count markdown file(s)"
+    
+    # Check for common docs
+    COMMON_DOCS=("ARCHITECTURE.md" "DEPLOYMENT.md" "CONTRIBUTING.md" "SECURITY.md")
+    
+    for doc in "${COMMON_DOCS[@]}"; do
+        if [[ -f "docs/$doc" ]]; then
+            jtoye_pass "Has docs/$doc"
+        fi
+    done
+    
+    # Check for empty docs
+    while IFS= read -r -d '' doc; do
+        lines=$(wc -l < "$doc")
+        if [[ $lines -lt 5 ]]; then
+            jtoye_warn "Nearly empty doc: $doc ($lines lines)"
+            inc WARNINGS
+        fi
+    done < <(find docs -name "*.md" -print0 2>/dev/null)
+else
+    jtoye_info "No docs/ directory - consider adding one"
+fi
+
+# =============================================================================
+# 7. License
+# =============================================================================
+jtoye_section "7" "License"
+
+if [[ -f "LICENSE" ]] || [[ -f "LICENSE.md" ]] || [[ -f "LICENSE.txt" ]]; then
+    jtoye_pass "License file exists"
+    
+    # Detect license type
+    license_file=$(ls LICENSE LICENSE.md LICENSE.txt 2>/dev/null | head -1)
+    if grep -qi "MIT" "$license_file"; then
+        jtoye_info "License: MIT"
+    elif grep -qi "Apache" "$license_file"; then
+        jtoye_info "License: Apache"
+    elif grep -qi "GPL" "$license_file"; then
+        jtoye_info "License: GPL"
+    elif grep -qi "ISC" "$license_file"; then
+        jtoye_info "License: ISC"
+    fi
+else
+    jtoye_info "No LICENSE file (required for open source)"
+fi
+
+# =============================================================================
+# 8. Outdated Documentation Check
+# =============================================================================
+jtoye_section "8" "Documentation Freshness"
+
+# Check if docs were updated recently (within 90 days)
+NINETY_DAYS_AGO=$(date -d "90 days ago" +%s 2>/dev/null || date -v-90d +%s 2>/dev/null)
+
+if [[ -n "$NINETY_DAYS_AGO" ]] && [[ -d ".git" ]]; then
+    # Check last README update
+    readme_date=$(git log -1 --format="%ct" -- README.md 2>/dev/null || echo 0)
+    
+    if [[ $readme_date -gt $NINETY_DAYS_AGO ]]; then
+        jtoye_pass "README.md updated within 90 days"
+    elif [[ $readme_date -gt 0 ]]; then
+        jtoye_info "README.md not updated in 90+ days"
+    fi
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "Documentation Validator"

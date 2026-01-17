@@ -1,0 +1,300 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Database Schema Checker v2.1
+# =============================================================================
+# Validates database migrations, schema design, and data integrity patterns.
+#
+# Usage: jtoye-database [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "Database Schema Checker" "v2.0"
+
+# Find migration directories
+MIGRATION_DIRS=""
+for dir in "migrations" "db/migrations" "database/migrations" "sql" "init-db"; do
+    if [[ -d "$dir" ]]; then
+        MIGRATION_DIRS="$MIGRATION_DIRS $dir"
+    fi
+done
+
+if [[ -z "$MIGRATION_DIRS" ]]; then
+    jtoye_info "No migration directories found"
+fi
+
+# =============================================================================
+# 1. Migration Files
+# =============================================================================
+jtoye_section "1" "Migration Files"
+
+migration_count=0
+for dir in $MIGRATION_DIRS; do
+    count=$(find "$dir" -name "*.sql" -o -name "*.go" -o -name "*.py" 2>/dev/null | wc -l)
+    migration_count=$((migration_count + count))
+done
+
+if [[ $migration_count -gt 0 ]]; then
+    jtoye_pass "Found $migration_count migration file(s)"
+    
+    # Check for numbered/timestamped migrations
+    numbered=$(find . -path "*/migrations/*" -name "[0-9]*" 2>/dev/null | wc -l)
+    if [[ $numbered -gt 0 ]]; then
+        jtoye_pass "Migrations are numbered/timestamped"
+    fi
+else
+    jtoye_info "No migration files found"
+fi
+
+# Check for down migrations
+down_migrations=$(find . -path "*/migrations/*" -name "*down*" 2>/dev/null | wc -l)
+if [[ $down_migrations -gt 0 ]]; then
+    jtoye_pass "Down migrations present ($down_migrations)"
+else
+    jtoye_info "No down migrations found - consider adding rollback scripts"
+fi
+
+# =============================================================================
+# 2. Primary Keys
+# =============================================================================
+jtoye_section "2" "Primary Keys"
+
+# Check for tables without primary keys
+tables_no_pk=$(grep -r $JTOYE_GREP_EXCLUDE -i "CREATE TABLE" \
+    --include="*.sql" 2>/dev/null | \
+    grep -v -i "PRIMARY KEY" | wc -l)
+
+if [[ $tables_no_pk -gt 0 ]]; then
+    jtoye_warn "$tables_no_pk CREATE TABLE without explicit PRIMARY KEY"
+    inc WARNINGS
+else
+    jtoye_pass "All tables have primary keys"
+fi
+
+# Check for UUID vs auto-increment
+uuid_keys=$(grep -r $JTOYE_GREP_EXCLUDE -i "uuid\|UUID" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+serial_keys=$(grep -r $JTOYE_GREP_EXCLUDE -i "SERIAL\|AUTO_INCREMENT\|IDENTITY" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $uuid_keys -gt 0 ]]; then
+    jtoye_info "UUID primary keys detected ($uuid_keys)"
+fi
+if [[ $serial_keys -gt 0 ]]; then
+    jtoye_info "Auto-increment primary keys detected ($serial_keys)"
+fi
+
+# =============================================================================
+# 3. Indexes
+# =============================================================================
+jtoye_section "3" "Indexes"
+
+index_count=$(grep -r $JTOYE_GREP_EXCLUDE -i "CREATE INDEX\|CREATE UNIQUE INDEX\|ADD INDEX" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $index_count -gt 0 ]]; then
+    jtoye_pass "$index_count index definition(s) found"
+else
+    jtoye_info "No explicit indexes found in migrations"
+fi
+
+# Check for foreign key indexes (common oversight)
+fk_count=$(grep -r $JTOYE_GREP_EXCLUDE -i "FOREIGN KEY\|REFERENCES" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $fk_count -gt $index_count ]] && [[ $fk_count -gt 0 ]]; then
+    jtoye_warn "More foreign keys ($fk_count) than indexes ($index_count) - verify FK columns are indexed"
+    inc WARNINGS
+fi
+
+# =============================================================================
+# 4. Constraints
+# =============================================================================
+jtoye_section "4" "Constraints"
+
+# NOT NULL constraints
+not_null=$(grep -r $JTOYE_GREP_EXCLUDE -i "NOT NULL" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $not_null -gt 0 ]]; then
+    jtoye_pass "NOT NULL constraints present ($not_null)"
+fi
+
+# CHECK constraints
+check_constraints=$(grep -r $JTOYE_GREP_EXCLUDE -i "CHECK\s*(" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $check_constraints -gt 0 ]]; then
+    jtoye_pass "CHECK constraints present ($check_constraints)"
+fi
+
+# UNIQUE constraints
+unique_constraints=$(grep -r $JTOYE_GREP_EXCLUDE -i "UNIQUE" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $unique_constraints -gt 0 ]]; then
+    jtoye_pass "UNIQUE constraints present ($unique_constraints)"
+fi
+
+# =============================================================================
+# 5. Timestamp Columns
+# =============================================================================
+jtoye_section "5" "Audit Columns"
+
+# Check for created_at/updated_at
+created_at=$(grep -r $JTOYE_GREP_EXCLUDE -i "created_at\|createdat\|created_date" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+updated_at=$(grep -r $JTOYE_GREP_EXCLUDE -i "updated_at\|updatedat\|modified_at\|modified_date" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $created_at -gt 0 ]]; then
+    jtoye_pass "created_at columns present ($created_at tables)"
+else
+    jtoye_info "Consider adding created_at timestamp columns"
+fi
+
+if [[ $updated_at -gt 0 ]]; then
+    jtoye_pass "updated_at columns present ($updated_at tables)"
+else
+    jtoye_info "Consider adding updated_at timestamp columns"
+fi
+
+# Soft delete columns
+soft_delete=$(grep -r $JTOYE_GREP_EXCLUDE -i "deleted_at\|is_deleted\|deleted" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $soft_delete -gt 0 ]]; then
+    jtoye_pass "Soft delete columns present ($soft_delete)"
+fi
+
+# =============================================================================
+# 6. Naming Conventions
+# =============================================================================
+jtoye_section "6" "Naming Conventions"
+
+# Check for snake_case (preferred for SQL)
+snake_case=$(grep -r $JTOYE_GREP_EXCLUDE -E "CREATE TABLE [a-z_]+" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+camel_case=$(grep -r $JTOYE_GREP_EXCLUDE -E "CREATE TABLE [a-z]+[A-Z]" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $snake_case -gt 0 ]] && [[ $camel_case -eq 0 ]]; then
+    jtoye_pass "Consistent snake_case naming"
+elif [[ $camel_case -gt 0 ]] && [[ $snake_case -eq 0 ]]; then
+    jtoye_pass "Consistent camelCase naming"
+elif [[ $camel_case -gt 0 ]] && [[ $snake_case -gt 0 ]]; then
+    jtoye_warn "Mixed naming conventions (snake_case: $snake_case, camelCase: $camel_case)"
+    inc WARNINGS
+fi
+
+# Check for plural table names
+plural_tables=$(grep -r $JTOYE_GREP_EXCLUDE -iE "CREATE TABLE [a-z_]+s\s*\(" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+singular_tables=$(grep -r $JTOYE_GREP_EXCLUDE -iE "CREATE TABLE [a-z_]+[^s]\s*\(" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $plural_tables -gt 0 ]]; then
+    jtoye_info "Using plural table names ($plural_tables)"
+fi
+
+# =============================================================================
+# 7. Data Types
+# =============================================================================
+jtoye_section "7" "Data Types"
+
+# Check for appropriate types
+text_fields=$(grep -r $JTOYE_GREP_EXCLUDE -i " TEXT\| LONGTEXT\| MEDIUMTEXT" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+varchar_fields=$(grep -r $JTOYE_GREP_EXCLUDE -i "VARCHAR" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $text_fields -gt 0 ]]; then
+    jtoye_info "$text_fields TEXT columns (verify appropriate use)"
+fi
+
+# Check for JSON columns (modern approach)
+json_cols=$(grep -r $JTOYE_GREP_EXCLUDE -i " JSON\| JSONB" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $json_cols -gt 0 ]]; then
+    jtoye_pass "JSON columns used for flexible data ($json_cols)"
+fi
+
+# Check for enum types
+enum_types=$(grep -r $JTOYE_GREP_EXCLUDE -i " ENUM\|CREATE TYPE.*AS ENUM" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $enum_types -gt 0 ]]; then
+    jtoye_pass "ENUM types defined ($enum_types)"
+fi
+
+# =============================================================================
+# 8. ORM Models (if applicable)
+# =============================================================================
+jtoye_section "8" "ORM Models"
+
+# Go GORM models
+gorm_models=$(grep -r $JTOYE_GREP_EXCLUDE "gorm:" --include="*.go" 2>/dev/null | wc -l)
+if [[ $gorm_models -gt 0 ]]; then
+    jtoye_pass "GORM model tags present ($gorm_models)"
+fi
+
+# Python SQLAlchemy
+sqlalchemy=$(grep -r $JTOYE_GREP_EXCLUDE "Column\|relationship\|Base\s*=" --include="*.py" 2>/dev/null | wc -l)
+if [[ $sqlalchemy -gt 0 ]]; then
+    jtoye_pass "SQLAlchemy models detected ($sqlalchemy)"
+fi
+
+# Prisma schema
+if [[ -f "prisma/schema.prisma" ]]; then
+    jtoye_pass "Prisma schema present"
+    
+    model_count=$(grep -c "^model " prisma/schema.prisma 2>/dev/null || echo 0)
+    jtoye_info "$model_count Prisma models defined"
+fi
+
+# TypeORM entities
+typeorm=$(grep -r $JTOYE_GREP_EXCLUDE -E "@Entity|@Column|@PrimaryGeneratedColumn" \
+    --include="*.ts" 2>/dev/null | wc -l)
+if [[ $typeorm -gt 0 ]]; then
+    jtoye_pass "TypeORM entities detected ($typeorm)"
+fi
+
+# =============================================================================
+# 9. Seed Data
+# =============================================================================
+jtoye_section "9" "Seed Data"
+
+seed_files=$(find . -name "*seed*" -o -name "*fixture*" 2>/dev/null | \
+    grep -v "node_modules\|.venv\|vendor" | wc -l)
+
+if [[ $seed_files -gt 0 ]]; then
+    jtoye_pass "Seed/fixture files present ($seed_files)"
+else
+    jtoye_info "No seed data files found - consider adding for development"
+fi
+
+# Check for INSERT statements in migrations
+insert_count=$(grep -r $JTOYE_GREP_EXCLUDE -i "^INSERT INTO" \
+    --include="*.sql" 2>/dev/null | wc -l)
+
+if [[ $insert_count -gt 0 ]]; then
+    jtoye_info "$insert_count INSERT statements in migrations (seed data)"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "Database Schema Checker"

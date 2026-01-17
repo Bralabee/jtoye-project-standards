@@ -1,0 +1,277 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Monitoring & Observability Checker v2.1
+# =============================================================================
+# Validates logging, metrics, tracing, and monitoring configurations.
+#
+# Usage: jtoye-monitoring [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "Monitoring & Observability" "v2.0"
+
+# =============================================================================
+# 1. Logging Configuration
+# =============================================================================
+jtoye_section "1" "Logging"
+
+# Check for structured logging
+structured_logging=false
+
+# Go logging
+if [[ -f "go.mod" ]]; then
+    if grep -r $JTOYE_GREP_EXCLUDE -E "zap\.|zerolog\.|logrus\." --include="*.go" 2>/dev/null | head -1 > /dev/null; then
+        jtoye_pass "Structured logging library (Go)"
+        structured_logging=true
+    fi
+fi
+
+# Python logging
+if [[ -f "requirements.txt" ]] || [[ -f "pyproject.toml" ]]; then
+    if grep -r $JTOYE_GREP_EXCLUDE -E "structlog|loguru|python-json-logger" \
+        requirements.txt pyproject.toml 2>/dev/null | head -1 > /dev/null; then
+        jtoye_pass "Structured logging library (Python)"
+        structured_logging=true
+    fi
+fi
+
+# Node.js logging
+if [[ -f "package.json" ]]; then
+    if grep -qE "pino|winston|bunyan" package.json 2>/dev/null; then
+        jtoye_pass "Structured logging library (Node.js)"
+        structured_logging=true
+    fi
+fi
+
+if [[ "$structured_logging" = false ]]; then
+    jtoye_warn "No structured logging library detected"
+    inc WARNINGS
+fi
+
+# Check for log levels
+log_levels=$(grep -r $JTOYE_GREP_EXCLUDE -E "\.Info\(|\.Error\(|\.Warn\(|\.Debug\(|log\.info|log\.error|logger\.(info|error|warn|debug)" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" 2>/dev/null | wc -l)
+
+if [[ $log_levels -gt 0 ]]; then
+    jtoye_pass "Log level usage found ($log_levels calls)"
+fi
+
+# =============================================================================
+# 2. Metrics
+# =============================================================================
+jtoye_section "2" "Metrics"
+
+# Prometheus metrics
+prom_metrics=$(grep -r $JTOYE_GREP_EXCLUDE -E "prometheus|Prometheus|NewCounter|NewGauge|NewHistogram|Counter\(|Gauge\(|Histogram\(" \
+    --include="*.go" --include="*.py" --include="*.ts" 2>/dev/null | wc -l)
+
+if [[ $prom_metrics -gt 0 ]]; then
+    jtoye_pass "Prometheus metrics implementation ($prom_metrics references)"
+fi
+
+# StatsD/Datadog
+statsd=$(grep -r $JTOYE_GREP_EXCLUDE -E "statsd|datadog|StatsD" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.yaml" 2>/dev/null | wc -l)
+
+if [[ $statsd -gt 0 ]]; then
+    jtoye_pass "StatsD/Datadog metrics ($statsd references)"
+fi
+
+# Check for metrics endpoint
+metrics_endpoint=$(grep -r $JTOYE_GREP_EXCLUDE -E '"/metrics"|/metrics' \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.yaml" 2>/dev/null | wc -l)
+
+if [[ $metrics_endpoint -gt 0 ]]; then
+    jtoye_pass "Metrics endpoint configured"
+fi
+
+if [[ $prom_metrics -eq 0 ]] && [[ $statsd -eq 0 ]]; then
+    jtoye_info "No metrics implementation detected"
+fi
+
+# =============================================================================
+# 3. Distributed Tracing
+# =============================================================================
+jtoye_section "3" "Distributed Tracing"
+
+# OpenTelemetry
+otel=$(grep -r $JTOYE_GREP_EXCLUDE -E "opentelemetry|otel|OpenTelemetry" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.yaml" 2>/dev/null | wc -l)
+
+if [[ $otel -gt 0 ]]; then
+    jtoye_pass "OpenTelemetry tracing ($otel references)"
+fi
+
+# Jaeger
+jaeger=$(grep -r $JTOYE_GREP_EXCLUDE -E "jaeger|Jaeger" \
+    --include="*.go" --include="*.py" --include="*.yaml" --include="*.yml" 2>/dev/null | wc -l)
+
+if [[ $jaeger -gt 0 ]]; then
+    jtoye_pass "Jaeger tracing configured ($jaeger references)"
+fi
+
+# Trace IDs in logs
+trace_id=$(grep -r $JTOYE_GREP_EXCLUDE -E "trace_id|traceId|TraceID|X-Trace-ID|X-Request-ID" \
+    --include="*.go" --include="*.py" --include="*.ts" 2>/dev/null | wc -l)
+
+if [[ $trace_id -gt 0 ]]; then
+    jtoye_pass "Trace ID correlation present ($trace_id references)"
+fi
+
+if [[ $otel -eq 0 ]] && [[ $jaeger -eq 0 ]]; then
+    jtoye_info "No distributed tracing detected"
+fi
+
+# =============================================================================
+# 4. Health Checks
+# =============================================================================
+jtoye_section "4" "Health Checks"
+
+# Health endpoint
+health_endpoint=$(grep -r $JTOYE_GREP_EXCLUDE -E '"/health"|/health|"/healthz"|/healthz|"/ready"|/ready' \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.yaml" 2>/dev/null | wc -l)
+
+if [[ $health_endpoint -gt 0 ]]; then
+    jtoye_pass "Health check endpoint(s) configured"
+else
+    jtoye_warn "No health check endpoints found"
+    inc WARNINGS
+fi
+
+# Readiness/Liveness probes
+probes=$(grep -r $JTOYE_GREP_EXCLUDE -E "livenessProbe|readinessProbe|liveness|readiness" \
+    --include="*.yaml" --include="*.yml" 2>/dev/null | wc -l)
+
+if [[ $probes -gt 0 ]]; then
+    jtoye_pass "Kubernetes probes configured ($probes)"
+fi
+
+# =============================================================================
+# 5. Error Tracking
+# =============================================================================
+jtoye_section "5" "Error Tracking"
+
+# Sentry
+sentry=$(grep -r $JTOYE_GREP_EXCLUDE -E "sentry|Sentry|SENTRY_DSN" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" \
+    --include="*.yaml" --include="*.env*" 2>/dev/null | wc -l)
+
+if [[ $sentry -gt 0 ]]; then
+    jtoye_pass "Sentry error tracking configured ($sentry references)"
+fi
+
+# Rollbar
+rollbar=$(grep -r $JTOYE_GREP_EXCLUDE -E "rollbar|Rollbar" \
+    --include="*.go" --include="*.py" --include="*.ts" 2>/dev/null | wc -l)
+
+if [[ $rollbar -gt 0 ]]; then
+    jtoye_pass "Rollbar error tracking configured"
+fi
+
+# Bugsnag
+bugsnag=$(grep -r $JTOYE_GREP_EXCLUDE -E "bugsnag|Bugsnag" \
+    --include="*.go" --include="*.py" --include="*.ts" 2>/dev/null | wc -l)
+
+if [[ $bugsnag -gt 0 ]]; then
+    jtoye_pass "Bugsnag error tracking configured"
+fi
+
+if [[ $sentry -eq 0 ]] && [[ $rollbar -eq 0 ]] && [[ $bugsnag -eq 0 ]]; then
+    jtoye_info "No error tracking service detected"
+fi
+
+# =============================================================================
+# 6. Alerting Configuration
+# =============================================================================
+jtoye_section "6" "Alerting"
+
+# Check for alert rules
+alert_rules=$(find . -name "*alert*" -o -name "*rule*" 2>/dev/null | \
+    grep -v "node_modules\|.venv" | wc -l)
+
+if [[ $alert_rules -gt 0 ]]; then
+    jtoye_pass "Alert configuration files found ($alert_rules)"
+fi
+
+# PagerDuty/OpsGenie integration
+alerting_service=$(grep -r $JTOYE_GREP_EXCLUDE -E "pagerduty|opsgenie|PagerDuty|OpsGenie|slack.*webhook|SLACK_WEBHOOK" \
+    --include="*.yaml" --include="*.yml" --include="*.env*" 2>/dev/null | wc -l)
+
+if [[ $alerting_service -gt 0 ]]; then
+    jtoye_pass "Alerting service integration found"
+fi
+
+# =============================================================================
+# 7. Log Aggregation
+# =============================================================================
+jtoye_section "7" "Log Aggregation"
+
+# ELK/Elasticsearch
+elk=$(grep -r $JTOYE_GREP_EXCLUDE -E "elasticsearch|logstash|kibana|elastic" \
+    --include="*.yaml" --include="*.yml" --include="*.json" 2>/dev/null | wc -l)
+
+if [[ $elk -gt 0 ]]; then
+    jtoye_pass "ELK stack configuration found ($elk references)"
+fi
+
+# Fluentd/Fluent Bit
+fluent=$(grep -r $JTOYE_GREP_EXCLUDE -E "fluentd|fluent-bit|fluentbit" \
+    --include="*.yaml" --include="*.yml" --include="*.conf" 2>/dev/null | wc -l)
+
+if [[ $fluent -gt 0 ]]; then
+    jtoye_pass "Fluent logging configured ($fluent references)"
+fi
+
+# Loki
+loki=$(grep -r $JTOYE_GREP_EXCLUDE -E "loki|Loki" \
+    --include="*.yaml" --include="*.yml" 2>/dev/null | wc -l)
+
+if [[ $loki -gt 0 ]]; then
+    jtoye_pass "Loki log aggregation configured"
+fi
+
+# =============================================================================
+# 8. Dashboard Configuration
+# =============================================================================
+jtoye_section "8" "Dashboards"
+
+# Grafana dashboards
+grafana=$(find . -name "*grafana*" -o -name "*.json" 2>/dev/null | \
+    xargs grep -l "dashboard\|panel" 2>/dev/null | wc -l)
+
+if [[ $grafana -gt 0 ]]; then
+    jtoye_pass "Grafana dashboard configurations found ($grafana)"
+fi
+
+# Check for dashboard-as-code
+if [[ -d "dashboards" ]] || [[ -d "monitoring/dashboards" ]]; then
+    jtoye_pass "Dashboard directory present (infrastructure as code)"
+fi
+
+# =============================================================================
+# 9. Request Logging
+# =============================================================================
+jtoye_section "9" "Request Logging"
+
+# Middleware for request logging
+request_logging=$(grep -r $JTOYE_GREP_EXCLUDE -E "RequestLogger|LoggingMiddleware|morgan|access.log|AccessLog" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" 2>/dev/null | wc -l)
+
+if [[ $request_logging -gt 0 ]]; then
+    jtoye_pass "Request logging middleware present ($request_logging)"
+else
+    jtoye_info "Consider adding request/access logging"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "Monitoring & Observability"

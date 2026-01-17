@@ -1,0 +1,178 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Security Scanner v2.1
+# =============================================================================
+# Scans for security vulnerabilities, exposed secrets, and misconfigurations.
+# Part of the jtoye-* toolkit for J'Toye Digital projects.
+#
+# Usage: jtoye-security [project-root]
+# =============================================================================
+
+# Note: set -euo pipefail is set in jtoye-common.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "J'Toye Security Scanner" "v2.1"
+jtoye_info "Scanning: $PROJECT_ROOT"
+echo ""
+
+# -----------------------------------------------------------------------------
+# 1. Hardcoded Secrets Detection
+# -----------------------------------------------------------------------------
+jtoye_section "1/6 Scanning for hardcoded secrets"
+
+# Pattern matches common secret patterns but excludes test/example files
+SECRETS=$(grep -rn $JTOYE_GREP_EXCLUDE \
+    -E "(password|secret|api_key|apikey|token|private_key)\s*[:=]\s*[\"'][^\"']{8,}" \
+    "$PROJECT_ROOT" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" --include="*.json" --include="*.yaml" --include="*.yml" \
+    2>/dev/null | \
+    grep -v -E "(example|test|mock|sample|placeholder|your-|changeme|xxx|TODO|FIXME|_test\.go|_test\.py|\.test\.)" | \
+    head -5 || true)
+
+if [[ -n "$SECRETS" ]]; then
+    jtoye_warn "Potential hardcoded secrets found:"
+    echo "$SECRETS" | head -3 | while read -r line; do
+        echo "    $(echo "$line" | cut -d: -f1-2)"
+    done
+    inc WARNINGS
+else
+    jtoye_pass "No hardcoded secrets detected"
+fi
+
+# -----------------------------------------------------------------------------
+# 2. Environment File Exposure
+# -----------------------------------------------------------------------------
+jtoye_section "2/6 Checking .env file security"
+
+# Check .gitignore
+if [[ -f "$PROJECT_ROOT/.gitignore" ]]; then
+    if grep -qE "^\.env$|^\.env\." "$PROJECT_ROOT/.gitignore" 2>/dev/null; then
+        jtoye_pass ".env patterns in .gitignore"
+    else
+        jtoye_fail ".env not properly ignored in .gitignore"
+        inc ERRORS
+    fi
+else
+    jtoye_warn "No .gitignore file found"
+    inc WARNINGS
+fi
+
+# Check if .env files are tracked
+if git -C "$PROJECT_ROOT" rev-parse --git-dir &>/dev/null; then
+    ENV_TRACKED=$(git -C "$PROJECT_ROOT" ls-files "*.env" ".env*" 2>/dev/null | grep -v -E "\.example$|\.sample$|\.template$" | head -3 || true)
+    if [[ -n "$ENV_TRACKED" ]]; then
+        jtoye_fail "Sensitive .env files tracked in git:"
+        echo "$ENV_TRACKED" | while read -r f; do echo "    $f"; done
+        inc ERRORS
+    else
+        jtoye_pass "No .env files tracked in git"
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Insecure Configuration Patterns
+# -----------------------------------------------------------------------------
+jtoye_section "3/6 Checking for insecure configurations"
+
+INSECURE=$(grep -rn $JTOYE_GREP_EXCLUDE \
+    -iE "insecure.*=.*true|verify.*=.*false|skip.*ssl|disable.*tls|allow.*insecure" \
+    "$PROJECT_ROOT" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" --include="*.yml" --include="*.yaml" --include="*.json" \
+    2>/dev/null | \
+    grep -v -E "(test|mock|example|dev\.|development)" | \
+    head -3 || true)
+
+if [[ -n "$INSECURE" ]]; then
+    jtoye_warn "Potentially insecure configurations:"
+    echo "$INSECURE" | while read -r line; do
+        echo "    $(echo "$line" | cut -d: -f1-2)"
+    done
+    inc WARNINGS
+else
+    jtoye_pass "No insecure configuration patterns found"
+fi
+
+# -----------------------------------------------------------------------------
+# 4. Dependency Vulnerability Scan
+# -----------------------------------------------------------------------------
+jtoye_section "4/6 Checking dependency vulnerabilities"
+
+# npm audit (with timeout)
+if [[ -f "$PROJECT_ROOT/package-lock.json" ]] && command -v npm &>/dev/null; then
+    AUDIT=$(cd "$PROJECT_ROOT" && timeout 30 npm audit --json 2>/dev/null || echo '{}')
+    
+    CRITICAL=$(echo "$AUDIT" | grep -o '"critical":[0-9]*' | grep -o '[0-9]*' || echo "0")
+    HIGH=$(echo "$AUDIT" | grep -o '"high":[0-9]*' | grep -o '[0-9]*' || echo "0")
+    
+    if [[ "$CRITICAL" -gt 0 ]]; then
+        jtoye_fail "npm: $CRITICAL critical vulnerabilities"
+        inc ERRORS
+    elif [[ "$HIGH" -gt 0 ]]; then
+        jtoye_warn "npm: $HIGH high severity vulnerabilities"
+        inc WARNINGS
+    else
+        jtoye_pass "npm: No critical/high vulnerabilities"
+    fi
+else
+    jtoye_skip "npm audit (no package-lock.json)"
+fi
+
+# pip-audit check (if available)
+if command -v pip-audit &>/dev/null && [[ -f "$PROJECT_ROOT/requirements.txt" ]]; then
+    if pip-audit -r "$PROJECT_ROOT/requirements.txt" --desc 2>/dev/null | grep -q "found"; then
+        jtoye_warn "pip: Vulnerabilities found (run pip-audit for details)"
+        inc WARNINGS
+    else
+        jtoye_pass "pip: No known vulnerabilities"
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# 5. Security Headers/Middleware
+# -----------------------------------------------------------------------------
+jtoye_section "5/6 Checking security middleware"
+
+SEC_PATTERNS="helmet|CORS|csrf|XSS|Content-Security-Policy|X-Frame-Options|Strict-Transport|rate.*limit|RateLimit"
+SEC_FOUND=$(grep -rn $JTOYE_GREP_EXCLUDE -E "$SEC_PATTERNS" "$PROJECT_ROOT" \
+    --include="*.go" --include="*.ts" --include="*.js" --include="*.py" \
+    2>/dev/null | head -1 || true)
+
+if [[ -n "$SEC_FOUND" ]]; then
+    jtoye_pass "Security middleware/headers detected"
+else
+    jtoye_warn "No security middleware detected (helmet, CORS, rate limiting)"
+    inc WARNINGS
+fi
+
+# -----------------------------------------------------------------------------
+# 6. Sensitive Files in Repository
+# -----------------------------------------------------------------------------
+jtoye_section "6/6 Checking for sensitive files"
+
+if git -C "$PROJECT_ROOT" rev-parse --git-dir &>/dev/null; then
+    SENSITIVE=$(git -C "$PROJECT_ROOT" ls-files \
+        "*.pem" "*.key" "*.p12" "*.pfx" "*credentials*" "*secret*" "*.keystore" "id_rsa*" "*.crt" \
+        2>/dev/null | grep -v -E "(example|sample|template|test|public)" | head -5 || true)
+    
+    if [[ -n "$SENSITIVE" ]]; then
+        jtoye_fail "Sensitive files tracked in git:"
+        echo "$SENSITIVE" | while read -r f; do echo "    $f"; done
+        inc ERRORS
+    else
+        jtoye_pass "No sensitive files in repository"
+    fi
+else
+    jtoye_skip "Git not initialized - cannot check tracked files"
+fi
+
+# -----------------------------------------------------------------------------
+# Summary
+# -----------------------------------------------------------------------------
+jtoye_summary $ERRORS $WARNINGS "Security scan"

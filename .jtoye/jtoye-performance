@@ -1,0 +1,255 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Performance Pattern Checker v2.1
+# =============================================================================
+# Checks for common performance anti-patterns and best practices.
+#
+# Usage: jtoye-performance [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "Performance Pattern Checker" "v2.0"
+
+# =============================================================================
+# 1. N+1 Query Patterns
+# =============================================================================
+jtoye_section "1" "N+1 Query Patterns"
+
+# Go patterns
+n_plus_one_go=$(grep -r $JTOYE_GREP_EXCLUDE -E "for.*range.*\{" --include="*.go" -A5 2>/dev/null | \
+    grep -E "db\.|sql\.|Query|Exec" | wc -l)
+
+# Python patterns
+n_plus_one_py=$(grep -r $JTOYE_GREP_EXCLUDE -E "for .* in .*:" --include="*.py" -A3 2>/dev/null | \
+    grep -E "\.query\(|\.execute\(|session\.get\(|\.filter\(" | wc -l)
+
+# TypeScript/JS patterns
+n_plus_one_ts=$(grep -r $JTOYE_GREP_EXCLUDE -E "for.*of|\.forEach\(|\.map\(" --include="*.ts" --include="*.js" -A3 2>/dev/null | \
+    grep -E "await.*find|await.*query|prisma\.|\.findOne\(" | wc -l)
+
+total_n_plus_one=$((n_plus_one_go + n_plus_one_py + n_plus_one_ts))
+
+if [[ $total_n_plus_one -gt 3 ]]; then
+    jtoye_warn "Potential N+1 query patterns detected (~$total_n_plus_one locations)"
+    inc WARNINGS
+elif [[ $total_n_plus_one -gt 0 ]]; then
+    jtoye_info "$total_n_plus_one potential N+1 patterns (review recommended)"
+else
+    jtoye_pass "No obvious N+1 query patterns"
+fi
+
+# =============================================================================
+# 2. Unbounded Queries
+# =============================================================================
+jtoye_section "2" "Unbounded Queries"
+
+# Look for queries without LIMIT
+unbounded=$(grep -r $JTOYE_GREP_EXCLUDE -E "SELECT.*FROM" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.sql" 2>/dev/null | \
+    grep -iv "LIMIT\|TOP\|ROWNUM\|FETCH FIRST" | wc -l)
+
+if [[ $unbounded -gt 5 ]]; then
+    jtoye_warn "~$unbounded queries without explicit LIMIT clauses"
+    inc WARNINGS
+else
+    jtoye_pass "Most queries appear to have LIMIT clauses"
+fi
+
+# Check for findAll without pagination
+find_all=$(grep -r $JTOYE_GREP_EXCLUDE -E "findAll\(\s*\)|\.all\(\s*\)|Find\(\s*\)" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" 2>/dev/null | wc -l)
+
+if [[ $find_all -gt 0 ]]; then
+    jtoye_warn "$find_all potential unbounded find operations"
+    inc WARNINGS
+fi
+
+# =============================================================================
+# 3. Memory Patterns
+# =============================================================================
+jtoye_section "3" "Memory Patterns"
+
+# Large slice/list preallocations
+large_alloc=$(grep -r $JTOYE_GREP_EXCLUDE -E "make\(\[\].*[0-9]{4,}\)|= \[\] \* [0-9]{4}" \
+    --include="*.go" --include="*.py" 2>/dev/null | wc -l)
+
+if [[ $large_alloc -gt 0 ]]; then
+    jtoye_info "$large_alloc large preallocations (verify intentional)"
+fi
+
+# Unbounded append in loops (Go)
+append_in_loop=$(grep -r $JTOYE_GREP_EXCLUDE -E "for.*\{" --include="*.go" -A5 2>/dev/null | \
+    grep "append(" | wc -l)
+
+if [[ $append_in_loop -gt 10 ]]; then
+    jtoye_info "$append_in_loop append operations in loops (consider preallocation)"
+fi
+
+# Check for streaming patterns
+if grep -r $JTOYE_GREP_EXCLUDE -E "bufio\.|io\.Reader|StreamingResponse|yield" \
+    --include="*.go" --include="*.py" --include="*.ts" 2>/dev/null | head -1 > /dev/null; then
+    jtoye_pass "Streaming patterns present for large data"
+fi
+
+# =============================================================================
+# 4. Caching Patterns
+# =============================================================================
+jtoye_section "4" "Caching"
+
+cache_patterns=$(grep -r $JTOYE_GREP_EXCLUDE -E "cache|Cache|redis|memcached|lru" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" 2>/dev/null | wc -l)
+
+if [[ $cache_patterns -gt 0 ]]; then
+    jtoye_pass "Caching implementation found ($cache_patterns references)"
+    
+    # Check for cache invalidation
+    invalidation=$(grep -r $JTOYE_GREP_EXCLUDE -E "invalidate|Delete|Del\(|clear.*cache|flush" \
+        --include="*.go" --include="*.py" --include="*.ts" 2>/dev/null | wc -l)
+    
+    if [[ $invalidation -gt 0 ]]; then
+        jtoye_pass "Cache invalidation logic present"
+    else
+        jtoye_warn "No cache invalidation logic found"
+        inc WARNINGS
+    fi
+else
+    jtoye_info "No caching implementation detected"
+fi
+
+# =============================================================================
+# 5. Async/Concurrent Patterns
+# =============================================================================
+jtoye_section "5" "Concurrency"
+
+# Go goroutines
+goroutines=$(grep -r $JTOYE_GREP_EXCLUDE "go func\|go " --include="*.go" 2>/dev/null | \
+    grep -v "// " | wc -l)
+
+if [[ $goroutines -gt 0 ]]; then
+    jtoye_pass "Goroutines used for concurrency ($goroutines)"
+    
+    # Check for WaitGroup or channel patterns
+    sync_patterns=$(grep -r $JTOYE_GREP_EXCLUDE -E "sync\.WaitGroup|<-.*chan|select \{" --include="*.go" 2>/dev/null | wc -l)
+    
+    if [[ $sync_patterns -gt 0 ]]; then
+        jtoye_pass "Proper synchronization patterns present"
+    else
+        jtoye_warn "Goroutines without visible synchronization"
+        inc WARNINGS
+    fi
+fi
+
+# Python async
+async_py=$(grep -r $JTOYE_GREP_EXCLUDE -E "async def|await " --include="*.py" 2>/dev/null | wc -l)
+
+if [[ $async_py -gt 0 ]]; then
+    jtoye_pass "Python async/await patterns found ($async_py)"
+fi
+
+# TypeScript async
+async_ts=$(grep -r $JTOYE_GREP_EXCLUDE -E "async.*=>|async function|await " --include="*.ts" --include="*.tsx" 2>/dev/null | wc -l)
+
+if [[ $async_ts -gt 0 ]]; then
+    jtoye_pass "TypeScript async patterns found ($async_ts)"
+fi
+
+# =============================================================================
+# 6. Connection Pooling
+# =============================================================================
+jtoye_section "6" "Connection Pooling"
+
+pool_patterns=$(grep -r $JTOYE_GREP_EXCLUDE -E "pool|Pool|MaxOpenConns|MaxIdleConns|pool_size" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" \
+    --include="*.yaml" --include="*.yml" --include="*.json" 2>/dev/null | wc -l)
+
+if [[ $pool_patterns -gt 0 ]]; then
+    jtoye_pass "Connection pooling configured ($pool_patterns references)"
+else
+    # Check if database is used
+    if grep -r $JTOYE_GREP_EXCLUDE -E "sql\.|database|postgres|mysql|mongo" \
+        --include="*.go" --include="*.py" --include="*.ts" 2>/dev/null | head -1 > /dev/null; then
+        jtoye_warn "Database used but no connection pooling detected"
+        inc WARNINGS
+    fi
+fi
+
+# =============================================================================
+# 7. Index Usage (SQL)
+# =============================================================================
+jtoye_section "7" "Database Indexes"
+
+# Check migration files for indexes
+if [[ -d "migrations" ]] || [[ -d "db/migrations" ]]; then
+    index_count=$(grep -r $JTOYE_GREP_EXCLUDE -i "CREATE INDEX\|ADD INDEX" \
+        --include="*.sql" 2>/dev/null | wc -l)
+    
+    if [[ $index_count -gt 0 ]]; then
+        jtoye_pass "$index_count index definition(s) in migrations"
+    else
+        jtoye_info "No explicit index definitions found in migrations"
+    fi
+fi
+
+# Check for missing index hints
+slow_queries=$(grep -r $JTOYE_GREP_EXCLUDE -E "WHERE.*AND.*AND" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.sql" 2>/dev/null | \
+    grep -iv "CREATE\|INDEX" | wc -l)
+
+if [[ $slow_queries -gt 5 ]]; then
+    jtoye_info "$slow_queries complex WHERE clauses - verify indexes exist"
+fi
+
+# =============================================================================
+# 8. Frontend Performance
+# =============================================================================
+jtoye_section "8" "Frontend Performance"
+
+if [[ -f "package.json" ]]; then
+    # Check for lazy loading
+    lazy_load=$(grep -r $JTOYE_GREP_EXCLUDE -E "lazy\(|dynamic\(|React\.lazy|loadable" \
+        --include="*.tsx" --include="*.jsx" --include="*.ts" --include="*.js" 2>/dev/null | wc -l)
+    
+    if [[ $lazy_load -gt 0 ]]; then
+        jtoye_pass "Code splitting/lazy loading present ($lazy_load)"
+    else
+        jtoye_info "Consider lazy loading for large components"
+    fi
+    
+    # Check for image optimization
+    if grep -r $JTOYE_GREP_EXCLUDE -E "next/image|Image.*loading|lazy.*img" \
+        --include="*.tsx" --include="*.jsx" 2>/dev/null | head -1 > /dev/null; then
+        jtoye_pass "Image optimization patterns present"
+    fi
+    
+    # Check for bundle analyzer
+    if grep -q "bundle-analyzer\|webpack-bundle-analyzer" package.json; then
+        jtoye_pass "Bundle analyzer configured"
+    fi
+fi
+
+# =============================================================================
+# 9. API Rate Limiting
+# =============================================================================
+jtoye_section "9" "Rate Limiting"
+
+rate_limit=$(grep -r $JTOYE_GREP_EXCLUDE -E "rate.*limit|RateLimit|throttle|Throttle" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" 2>/dev/null | wc -l)
+
+if [[ $rate_limit -gt 0 ]]; then
+    jtoye_pass "Rate limiting implemented ($rate_limit references)"
+else
+    jtoye_info "No rate limiting detected - consider for production APIs"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "Performance Pattern Checker"

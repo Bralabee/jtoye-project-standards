@@ -1,0 +1,233 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Test Coverage Analyzer v2.1
+# =============================================================================
+# Analyzes test coverage and identifies files missing tests.
+# FIXED: Properly excludes virtual environment packages.
+#
+# Usage: jtoye-coverage [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+WARNINGS=0
+PROJECT_TYPES=$(detect_project_type "$PROJECT_ROOT")
+
+# Configurable thresholds
+GO_THRESHOLD=${JTOYE_GO_COVERAGE:-60}
+PY_THRESHOLD=${JTOYE_PY_COVERAGE:-50}
+NODE_THRESHOLD=${JTOYE_NODE_COVERAGE:-40}
+
+jtoye_header "J'Toye Test Coverage Analyzer"
+jtoye_info "Project: $PROJECT_ROOT"
+jtoye_info "Thresholds: Go=$GO_THRESHOLD%, Python=$PY_THRESHOLD%, Node=$NODE_THRESHOLD%"
+echo ""
+
+# -----------------------------------------------------------------------------
+# 1. Find Files Without Tests
+# -----------------------------------------------------------------------------
+jtoye_section "1/3 Finding files without tests"
+
+# Go files without tests
+if [[ "$PROJECT_TYPES" == *"go"* ]]; then
+    # FIXED: Properly exclude vendor and only check project Go files
+    GO_MISSING=0
+    
+    GO_FILES=$(find "$PROJECT_ROOT" -name "*.go" \
+        -not -name "*_test.go" \
+        -not -name "mock_*.go" \
+        -not -name "*_mock.go" \
+        -not -name "*_gen.go" \
+        -not -path "*/vendor/*" \
+        -not -path "*/.git/*" \
+        2>/dev/null || true)
+    
+    for file in $GO_FILES; do
+        basename_file=$(basename "$file" .go)
+        dir=$(dirname "$file")
+        
+        # Skip main.go, cmd directories, generated files
+        [[ "$basename_file" == "main" ]] && continue
+        [[ "$file" == *"/cmd/"* ]] && continue
+        [[ "$basename_file" == *"_generated" ]] && continue
+        
+        # Check for corresponding test
+        test_file="${file%.go}_test.go"
+        dir_tests=$(find "$dir" -maxdepth 1 -name "*_test.go" 2>/dev/null | wc -l)
+        
+        if [[ ! -f "$test_file" ]] && [[ "$dir_tests" -eq 0 ]]; then
+            jtoye_warn "No tests: ${file#$PROJECT_ROOT/}"
+            inc GO_MISSING
+            [[ $GO_MISSING -ge 10 ]] && break  # Limit output
+        fi
+    done
+    
+    if [[ $GO_MISSING -gt 0 ]]; then
+        jtoye_info "$GO_MISSING Go files may need tests"
+        inc WARNINGS
+    else
+        jtoye_pass "Go files have test coverage"
+    fi
+fi
+
+# Python files without tests - FIXED: Exclude site-packages, .venv, etc.
+if [[ "$PROJECT_TYPES" == *"python"* ]]; then
+    PY_MISSING=0
+    
+    # CRITICAL FIX: Properly exclude all virtual env and package directories
+    PY_FILES=$(find "$PROJECT_ROOT" -name "*.py" \
+        -not -name "test_*.py" \
+        -not -name "*_test.py" \
+        -not -name "conftest.py" \
+        -not -name "__init__.py" \
+        -not -name "setup.py" \
+        -not -path "*/.venv/*" \
+        -not -path "*/venv/*" \
+        -not -path "*/.env/*" \
+        -not -path "*/env/*" \
+        -not -path "*/__pycache__/*" \
+        -not -path "*/.git/*" \
+        -not -path "*/site-packages/*" \
+        -not -path "*/dist-packages/*" \
+        -not -path "*/.tox/*" \
+        -not -path "*/.eggs/*" \
+        -not -path "*/*.egg-info/*" \
+        -not -path "*/node_modules/*" \
+        -not -path "*/migrations/*" \
+        2>/dev/null || true)
+    
+    for file in $PY_FILES; do
+        basename_file=$(basename "$file" .py)
+        dir=$(dirname "$file")
+        
+        # Skip config/settings files
+        [[ "$basename_file" == "config" ]] && continue
+        [[ "$basename_file" == "settings" ]] && continue
+        [[ "$basename_file" == "manage" ]] && continue
+        [[ "$basename_file" == "wsgi" ]] && continue
+        [[ "$basename_file" == "asgi" ]] && continue
+        
+        # Check for test file
+        test1="$dir/test_${basename_file}.py"
+        test2="$dir/${basename_file}_test.py"
+        test3="$dir/tests/test_${basename_file}.py"
+        
+        if [[ ! -f "$test1" ]] && [[ ! -f "$test2" ]] && [[ ! -f "$test3" ]]; then
+            jtoye_warn "No tests: ${file#$PROJECT_ROOT/}"
+            inc PY_MISSING
+            [[ $PY_MISSING -ge 10 ]] && break  # Limit output
+        fi
+    done
+    
+    if [[ $PY_MISSING -gt 0 ]]; then
+        jtoye_info "$PY_MISSING Python files may need tests"
+        inc WARNINGS
+    else
+        jtoye_pass "Python files have test coverage"
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# 2. Run Coverage Analysis
+# -----------------------------------------------------------------------------
+jtoye_section "2/3 Running coverage analysis"
+
+# Go coverage
+if [[ "$PROJECT_TYPES" == *"go"* ]]; then
+    GO_DIRS=$(find "$PROJECT_ROOT" -name "go.mod" -not -path "*/vendor/*" -exec dirname {} \; 2>/dev/null || true)
+    
+    for dir in $GO_DIRS; do
+        label="${dir#$PROJECT_ROOT/}"
+        [[ "$dir" == "$PROJECT_ROOT" ]] && label="root"
+        
+        # Check if there are tests
+        if find "$dir" -name "*_test.go" 2>/dev/null | grep -q .; then
+            jtoye_info "Analyzing Go: $label"
+            
+            cd "$dir"
+            COVERAGE=$(go test -cover ./... 2>/dev/null | grep -oP 'coverage: \K[0-9.]+' | awk '{sum+=$1; count++} END {if(count>0) printf "%.0f", sum/count; else print "0"}' || echo "0")
+            cd "$PROJECT_ROOT"
+            
+            if [[ -n "$COVERAGE" ]] && [[ "$COVERAGE" -lt "$GO_THRESHOLD" ]]; then
+                jtoye_warn "$label: ${COVERAGE}% (threshold: ${GO_THRESHOLD}%)"
+                inc WARNINGS
+            else
+                jtoye_pass "$label: ${COVERAGE:-0}%"
+            fi
+        fi
+    done
+fi
+
+# Python coverage
+if [[ "$PROJECT_TYPES" == *"python"* ]] && command -v pytest &>/dev/null; then
+    # Find Python project roots (with tests)
+    PY_ROOTS=$(find "$PROJECT_ROOT" \( -name "pytest.ini" -o -name "pyproject.toml" -o -name "setup.py" \) \
+        -not -path "*/.venv/*" -not -path "*/venv/*" -not -path "*/site-packages/*" \
+        -exec dirname {} \; 2>/dev/null | sort -u | head -3 || true)
+    
+    for dir in $PY_ROOTS; do
+        label="${dir#$PROJECT_ROOT/}"
+        [[ "$dir" == "$PROJECT_ROOT" ]] && label="root"
+        
+        # Check for tests directory
+        if [[ -d "$dir/tests" ]] || find "$dir" -maxdepth 2 -name "test_*.py" 2>/dev/null | grep -q .; then
+            jtoye_info "Analyzing Python: $label"
+            
+            cd "$dir"
+            COVERAGE=$(pytest --cov=. --cov-report=term-missing -q 2>/dev/null | grep "TOTAL" | awk '{print $NF}' | tr -d '%' || echo "")
+            cd "$PROJECT_ROOT"
+            
+            if [[ -n "$COVERAGE" ]]; then
+                if [[ "$COVERAGE" -lt "$PY_THRESHOLD" ]]; then
+                    jtoye_warn "$label: ${COVERAGE}% (threshold: ${PY_THRESHOLD}%)"
+                    inc WARNINGS
+                else
+                    jtoye_pass "$label: ${COVERAGE}%"
+                fi
+            fi
+        fi
+    done
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Test Organization Check
+# -----------------------------------------------------------------------------
+jtoye_section "3/3 Checking test organization"
+
+# Check for test utilities
+if [[ -d "$PROJECT_ROOT/tests" ]] || find "$PROJECT_ROOT" -type d -name "tests" 2>/dev/null | grep -q .; then
+    jtoye_pass "Tests directory exists"
+else
+    jtoye_warn "No dedicated tests/ directory"
+    inc WARNINGS
+fi
+
+# Check for fixtures/testdata
+if find "$PROJECT_ROOT" -type d \( -name "fixtures" -o -name "testdata" -o -name "test_data" \) 2>/dev/null | grep -q .; then
+    jtoye_pass "Test fixtures/data directory found"
+else
+    jtoye_info "Consider adding fixtures/ or testdata/ directory"
+fi
+
+# Check for integration tests
+if grep -rq $JTOYE_GREP_EXCLUDE "integration\|e2e\|end.to.end" "$PROJECT_ROOT" --include="*test*" 2>/dev/null; then
+    jtoye_pass "Integration/E2E tests found"
+else
+    jtoye_warn "No integration tests detected"
+    inc WARNINGS
+fi
+
+# -----------------------------------------------------------------------------
+# Summary
+# -----------------------------------------------------------------------------
+echo ""
+jtoye_info "Recommendations:"
+echo "    • Run: go test -coverprofile=coverage.out ./..."
+echo "    • Run: pytest --cov --cov-report=html"
+echo "    • Run: npm test -- --coverage"
+
+jtoye_summary 0 $WARNINGS "Test coverage"

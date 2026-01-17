@@ -1,0 +1,331 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Architecture Validator v2.1
+# =============================================================================
+# Validates project structure, directory organization, and code architecture.
+#
+# Usage: jtoye-architecture [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "Architecture Validator" "v2.0"
+
+# =============================================================================
+# Detect Project Type
+# =============================================================================
+PROJECT_TYPES=()
+[[ -f "go.mod" ]] && PROJECT_TYPES+=("go")
+[[ -f "package.json" ]] && PROJECT_TYPES+=("node")
+[[ -f "requirements.txt" ]] || [[ -f "pyproject.toml" ]] || [[ -f "setup.py" ]] && PROJECT_TYPES+=("python")
+[[ -f "Cargo.toml" ]] && PROJECT_TYPES+=("rust")
+[[ -f "pom.xml" ]] || [[ -f "build.gradle" ]] && PROJECT_TYPES+=("java")
+
+# Detect monorepo
+IS_MONOREPO=false
+[[ -d "apps" ]] || [[ -d "packages" ]] || [[ -d "services" ]] && IS_MONOREPO=true
+[[ -f "pnpm-workspace.yaml" ]] || [[ -f "lerna.json" ]] || [[ -f "turbo.json" ]] && IS_MONOREPO=true
+
+if [[ ${#PROJECT_TYPES[@]} -eq 0 ]]; then
+    jtoye_warn "Could not detect project type"
+    inc WARNINGS
+else
+    jtoye_info "Detected project types: ${PROJECT_TYPES[*]}"
+fi
+
+[[ "$IS_MONOREPO" = true ]] && jtoye_info "Monorepo structure detected"
+
+# =============================================================================
+# 1. Essential Files Check
+# =============================================================================
+jtoye_section "1" "Essential Files"
+
+ESSENTIAL_FILES=(
+    "README.md:Project documentation"
+    ".gitignore:Git ignore rules"
+)
+
+for entry in "${ESSENTIAL_FILES[@]}"; do
+    file="${entry%%:*}"
+    desc="${entry##*:}"
+    
+    if [[ -f "$file" ]]; then
+        jtoye_pass "$file exists ($desc)"
+    else
+        jtoye_fail "Missing $file ($desc)"
+        inc ERRORS
+    fi
+done
+
+# Optional but recommended
+RECOMMENDED_FILES=(
+    "LICENSE:Open source license"
+    "CHANGELOG.md:Version history"
+    ".editorconfig:Editor configuration"
+    "Makefile:Build automation"
+    "docker-compose.yml:Development containers"
+)
+
+for entry in "${RECOMMENDED_FILES[@]}"; do
+    file="${entry%%:*}"
+    desc="${entry##*:}"
+    
+    if [[ -f "$file" ]]; then
+        jtoye_pass "$file exists ($desc)"
+    else
+        jtoye_info "Consider adding $file ($desc)"
+    fi
+done
+
+# =============================================================================
+# 2. Directory Structure
+# =============================================================================
+jtoye_section "2" "Directory Structure"
+
+if [[ "$IS_MONOREPO" = true ]]; then
+    # Monorepo structure checks
+    EXPECTED_DIRS=("docs" "scripts")
+    
+    if [[ -d "apps" ]]; then
+        jtoye_pass "apps/ directory exists (application code)"
+    elif [[ -d "packages" ]]; then
+        jtoye_pass "packages/ directory exists (shared packages)"
+    elif [[ -d "services" ]]; then
+        jtoye_pass "services/ directory exists (microservices)"
+    fi
+else
+    # Standard project structure
+    EXPECTED_DIRS=("docs")
+fi
+
+for dir in "${EXPECTED_DIRS[@]}"; do
+    if [[ -d "$dir" ]]; then
+        jtoye_pass "$dir/ directory exists"
+    else
+        jtoye_info "Consider adding $dir/ directory"
+    fi
+done
+
+# =============================================================================
+# 3. Go Project Structure
+# =============================================================================
+if [[ " ${PROJECT_TYPES[*]} " =~ " go " ]]; then
+    jtoye_section "3" "Go Project Structure"
+    
+    # Find Go modules in project
+    while IFS= read -r -d '' gomod; do
+        godir=$(dirname "$gomod")
+        jtoye_info "Go module: $godir"
+        
+        # Check standard Go directories
+        for dir in "cmd" "internal" "pkg"; do
+            if [[ -d "$godir/$dir" ]]; then
+                jtoye_pass "$godir/$dir/ exists"
+            fi
+        done
+        
+        # Check for main.go in cmd
+        if [[ -d "$godir/cmd" ]]; then
+            main_count=$(find "$godir/cmd" -name "main.go" 2>/dev/null | wc -l)
+            if [[ $main_count -gt 0 ]]; then
+                jtoye_pass "Found $main_count main.go entry point(s)"
+            else
+                jtoye_warn "No main.go found in cmd/"
+                inc WARNINGS
+            fi
+        fi
+        
+    done < <(find . -name "go.mod" -not -path "./.git/*" -print0)
+fi
+
+# =============================================================================
+# 4. Python Project Structure
+# =============================================================================
+if [[ " ${PROJECT_TYPES[*]} " =~ " python " ]]; then
+    jtoye_section "4" "Python Project Structure"
+    
+    # Check for proper package structure
+    if [[ -f "pyproject.toml" ]]; then
+        jtoye_pass "Modern pyproject.toml configuration"
+    elif [[ -f "setup.py" ]]; then
+        jtoye_info "Legacy setup.py (consider migrating to pyproject.toml)"
+    fi
+    
+    if [[ -f "requirements.txt" ]]; then
+        jtoye_pass "requirements.txt exists"
+        
+        # Check if pinned versions
+        if grep -q "==" requirements.txt; then
+            jtoye_pass "Dependencies have pinned versions"
+        else
+            jtoye_warn "Consider pinning dependency versions"
+            inc WARNINGS
+        fi
+    fi
+    
+    # Check for tests directory
+    if [[ -d "tests" ]] || [[ -d "test" ]]; then
+        jtoye_pass "Tests directory exists"
+    else
+        jtoye_warn "No tests/ directory found"
+        inc WARNINGS
+    fi
+fi
+
+# =============================================================================
+# 5. Node.js Project Structure
+# =============================================================================
+if [[ " ${PROJECT_TYPES[*]} " =~ " node " ]]; then
+    jtoye_section "5" "Node.js Project Structure"
+    
+    if [[ -f "package.json" ]]; then
+        # Check for required fields
+        if jq -e '.name' package.json > /dev/null 2>&1; then
+            jtoye_pass "package.json has name field"
+        else
+            jtoye_fail "package.json missing name field"
+            inc ERRORS
+        fi
+        
+        if jq -e '.version' package.json > /dev/null 2>&1; then
+            jtoye_pass "package.json has version field"
+        else
+            jtoye_fail "package.json missing version field"
+            inc ERRORS
+        fi
+        
+        # Check for scripts
+        if jq -e '.scripts.test' package.json > /dev/null 2>&1; then
+            jtoye_pass "Test script defined"
+        else
+            jtoye_warn "No test script in package.json"
+            inc WARNINGS
+        fi
+    fi
+    
+    # TypeScript check
+    if [[ -f "tsconfig.json" ]]; then
+        jtoye_pass "TypeScript configuration exists"
+        
+        if jq -e '.compilerOptions.strict' tsconfig.json 2>/dev/null | grep -q true; then
+            jtoye_pass "TypeScript strict mode enabled"
+        else
+            jtoye_info "Consider enabling strict mode in tsconfig.json"
+        fi
+    fi
+fi
+
+# =============================================================================
+# 6. Code Organization Patterns
+# =============================================================================
+jtoye_section "6" "Code Organization"
+
+# Check for deeply nested directories (potential code smell)
+deep_dirs=$(find . -type d -mindepth 8 \
+    ! -path "./.git/*" \
+    ! -path "./node_modules/*" \
+    ! -path "./.venv/*" \
+    ! -path "./venv/*" \
+    ! -path "./__pycache__/*" \
+    ! -path "*/.venv/*" \
+    ! -path "*/venv/*" \
+    ! -path "*/site-packages/*" \
+    ! -path "*/.tox/*" \
+    ! -path "*/vendor/*" \
+    ! -path "*/.next/*" \
+    ! -path "*/dist/*" \
+    2>/dev/null | head -5)
+
+if [[ -n "$deep_dirs" ]]; then
+    jtoye_warn "Deeply nested directories found (8+ levels):"
+    echo "$deep_dirs" | while read -r dir; do
+        echo "      $dir"
+    done
+    inc WARNINGS
+else
+    jtoye_pass "No excessively nested directories"
+fi
+
+# Check for potential circular dependencies (import patterns)
+if [[ " ${PROJECT_TYPES[*]} " =~ " python " ]]; then
+    # Look for __init__.py importing from sibling packages
+    init_imports=$(grep -r $JTOYE_GREP_EXCLUDE "from \.\." --include="__init__.py" 2>/dev/null | wc -l)
+    if [[ $init_imports -gt 5 ]]; then
+        jtoye_warn "Multiple relative imports in __init__.py files ($init_imports)"
+        inc WARNINGS
+    fi
+fi
+
+# =============================================================================
+# 7. Configuration Files
+# =============================================================================
+jtoye_section "7" "Configuration Management"
+
+# Check for environment config
+if [[ -f ".env.example" ]] || [[ -f ".env.sample" ]] || [[ -f ".env.template" ]]; then
+    jtoye_pass "Environment template exists"
+else
+    if [[ -f ".env" ]]; then
+        jtoye_warn ".env exists but no template file for documentation"
+        inc WARNINGS
+    fi
+fi
+
+# Check for hardcoded config values (simple check)
+hardcoded=$(grep -r $JTOYE_GREP_EXCLUDE -E "(localhost:?[0-9]+|127\.0\.0\.1)" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" \
+    2>/dev/null | grep -v "test" | grep -v "Test" | head -3)
+
+if [[ -n "$hardcoded" ]]; then
+    jtoye_warn "Potential hardcoded addresses found (review needed)"
+    inc WARNINGS
+fi
+
+# =============================================================================
+# 8. Documentation Structure
+# =============================================================================
+jtoye_section "8" "Documentation Structure"
+
+if [[ -d "docs" ]]; then
+    doc_count=$(find docs -name "*.md" 2>/dev/null | wc -l)
+    jtoye_pass "docs/ contains $doc_count markdown file(s)"
+    
+    # Check for key documentation
+    for doc in "ARCHITECTURE.md" "API.md" "DEPLOYMENT.md"; do
+        if [[ -f "docs/$doc" ]]; then
+            jtoye_pass "docs/$doc exists"
+        fi
+    done
+else
+    jtoye_info "No docs/ directory"
+fi
+
+# Check README quality
+if [[ -f "README.md" ]]; then
+    readme_lines=$(wc -l < README.md)
+    if [[ $readme_lines -lt 20 ]]; then
+        jtoye_warn "README.md is quite short ($readme_lines lines)"
+        inc WARNINGS
+    else
+        jtoye_pass "README.md has substantive content ($readme_lines lines)"
+    fi
+    
+    # Check for common sections
+    for section in "Installation" "Usage" "Getting Started"; do
+        if grep -qi "# $section\|## $section" README.md; then
+            jtoye_pass "README has $section section"
+        fi
+    done
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "Architecture Validator"

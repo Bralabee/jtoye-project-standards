@@ -1,0 +1,182 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Code Quality Analyzer v2.1
+# =============================================================================
+# Analyzes code quality across Go, Python, and TypeScript/JavaScript projects.
+# Checks formatting, linting, complexity, and code hygiene.
+#
+# Usage: jtoye-quality [project-root]
+# =============================================================================
+
+# Note: set -euo pipefail is set in jtoye-common.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+WARNINGS=0
+PROJECT_TYPES=$(detect_project_type "$PROJECT_ROOT")
+
+jtoye_header "J'Toye Code Quality Analyzer" "v2.1"
+jtoye_info "Project: $PROJECT_ROOT"
+jtoye_info "Detected: $PROJECT_TYPES"
+echo ""
+
+# -----------------------------------------------------------------------------
+# Go Quality Checks
+# -----------------------------------------------------------------------------
+if [[ "$PROJECT_TYPES" == *"go"* ]]; then
+    jtoye_section "Go Quality Checks"
+    
+    # Find all go.mod directories
+    GO_DIRS=$(find "$PROJECT_ROOT" -name "go.mod" -not -path "*/vendor/*" -exec dirname {} \; 2>/dev/null || true)
+    
+    for dir in $GO_DIRS; do
+        jtoye_info "Checking: ${dir#$PROJECT_ROOT/}"
+        cd "$dir"
+        
+        # go vet
+        if command -v go &>/dev/null; then
+            VET_OUTPUT=$(go vet ./... 2>&1 || true)
+            if [[ -z "$VET_OUTPUT" ]]; then
+                jtoye_pass "go vet passed"
+            else
+                jtoye_warn "go vet issues found"
+                inc WARNINGS
+            fi
+            
+            # gofmt
+            UNFORMATTED=$(gofmt -l . 2>/dev/null | grep -v vendor | head -10 || true)
+            if [[ -n "$UNFORMATTED" ]]; then
+                COUNT=$(echo "$UNFORMATTED" | wc -l)
+                jtoye_warn "$COUNT unformatted Go files (run: gofmt -w .)"
+                inc WARNINGS
+            else
+                jtoye_pass "All Go files formatted"
+            fi
+        fi
+        
+        cd "$PROJECT_ROOT"
+    done
+fi
+
+# -----------------------------------------------------------------------------
+# Python Quality Checks
+# -----------------------------------------------------------------------------
+if [[ "$PROJECT_TYPES" == *"python"* ]]; then
+    jtoye_section "Python Quality Checks"
+    
+    # Count Python files (excluding virtual envs)
+    PY_COUNT=$(find "$PROJECT_ROOT" -name "*.py" \
+        ! -path "*/.venv/*" ! -path "*/venv/*" ! -path "*/__pycache__/*" \
+        ! -path "*/site-packages/*" ! -path "*/.git/*" \
+        2>/dev/null | wc -l)
+    
+    jtoye_info "Found $PY_COUNT Python files"
+    
+    # Check for linter configs
+    if [[ -f "$PROJECT_ROOT/pyproject.toml" ]] || [[ -f "$PROJECT_ROOT/ruff.toml" ]] || [[ -f "$PROJECT_ROOT/.ruff.toml" ]]; then
+        jtoye_pass "Ruff/pyproject.toml config found"
+    elif [[ -f "$PROJECT_ROOT/.flake8" ]] || [[ -f "$PROJECT_ROOT/setup.cfg" ]]; then
+        jtoye_pass "Flake8 config found"
+    else
+        jtoye_warn "No Python linter config found (recommend: ruff)"
+        inc WARNINGS
+    fi
+    
+    # Run ruff if available
+    if command -v ruff &>/dev/null; then
+        RUFF_ISSUES=$(ruff check "$PROJECT_ROOT" --ignore E501 2>/dev/null | head -5 || true)
+        if [[ -n "$RUFF_ISSUES" ]]; then
+            jtoye_warn "Ruff found issues (run: ruff check --fix .)"
+            inc WARNINGS
+        else
+            jtoye_pass "Ruff check passed"
+        fi
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# TypeScript/JavaScript Quality Checks
+# -----------------------------------------------------------------------------
+if [[ "$PROJECT_TYPES" == *"node"* ]]; then
+    jtoye_section "TypeScript/JavaScript Quality Checks"
+    
+    # Find package.json locations
+    PKG_DIRS=$(find "$PROJECT_ROOT" -name "package.json" \
+        ! -path "*/node_modules/*" ! -path "*/.next/*" \
+        -exec dirname {} \; 2>/dev/null | head -5 || true)
+    
+    for dir in $PKG_DIRS; do
+        [[ "$dir" == "$PROJECT_ROOT" ]] && label="root" || label="${dir#$PROJECT_ROOT/}"
+        jtoye_info "Checking: $label"
+        cd "$dir"
+        
+        # Check for ESLint config
+        if [[ -f "eslint.config.js" ]] || [[ -f ".eslintrc.json" ]] || [[ -f ".eslintrc.js" ]] || [[ -f ".eslintrc" ]]; then
+            jtoye_pass "ESLint configured"
+            
+            # Run ESLint (with timeout)
+            if command -v npx &>/dev/null && [[ -d "node_modules" ]]; then
+                ESLINT_OUT=$(timeout 30 npx eslint . --ext .ts,.tsx,.js,.jsx --max-warnings 0 2>&1 || true)
+                if echo "$ESLINT_OUT" | grep -q "error"; then
+                    jtoye_warn "ESLint errors found"
+                    inc WARNINGS
+                fi
+            fi
+        else
+            jtoye_warn "No ESLint config in $label"
+            inc WARNINGS
+        fi
+        
+        # Check for Prettier
+        if [[ -f ".prettierrc" ]] || [[ -f ".prettierrc.json" ]] || [[ -f "prettier.config.js" ]]; then
+            jtoye_pass "Prettier configured"
+        fi
+        
+        cd "$PROJECT_ROOT"
+    done
+fi
+
+# -----------------------------------------------------------------------------
+# General Code Hygiene
+# -----------------------------------------------------------------------------
+jtoye_section "Code Hygiene"
+
+# Large files check
+LARGE_FILES=$(find "$PROJECT_ROOT" \( -name "*.go" -o -name "*.py" -o -name "*.ts" -o -name "*.tsx" -o -name "*.js" \) \
+    ! -path "*/node_modules/*" ! -path "*/.venv/*" ! -path "*/venv/*" \
+    ! -path "*/__pycache__/*" ! -path "*/.next/*" ! -path "*/dist/*" ! -path "*/vendor/*" \
+    -exec wc -l {} \; 2>/dev/null | awk '$1 > 500 {print $1 " " $2}' | sort -rn | head -3 || true)
+
+if [[ -n "$LARGE_FILES" ]]; then
+    jtoye_warn "Large files (>500 lines):"
+    echo "$LARGE_FILES" | while read -r lines file; do
+        echo "      $lines lines: ${file#$PROJECT_ROOT/}"
+    done
+    inc WARNINGS
+else
+    jtoye_pass "No excessively large files"
+fi
+
+# TODO/FIXME count
+TODO_COUNT=$(grep -rn $JTOYE_GREP_EXCLUDE "TODO\|FIXME\|HACK\|XXX" "$PROJECT_ROOT" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.tsx" --include="*.js" \
+    2>/dev/null | wc -l || echo "0")
+
+jtoye_info "Found $TODO_COUNT TODO/FIXME/HACK comments"
+
+# Unused imports check (basic heuristic)
+if [[ "$PROJECT_TYPES" == *"go"* ]]; then
+    UNUSED=$(grep -rn $JTOYE_GREP_EXCLUDE "imported and not used" "$PROJECT_ROOT" --include="*.go" 2>/dev/null | wc -l || echo "0")
+    if [[ "$UNUSED" -gt 0 ]]; then
+        jtoye_warn "$UNUSED potential unused imports in Go"
+        inc WARNINGS
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# Summary
+# -----------------------------------------------------------------------------
+jtoye_summary 0 $WARNINGS "Code quality"

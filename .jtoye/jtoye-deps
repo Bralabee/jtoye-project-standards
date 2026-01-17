@@ -1,0 +1,337 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Dependency Health Checker v2.1
+# =============================================================================
+# Analyzes project dependencies for security issues, outdated packages,
+# and general health.
+#
+# Usage: jtoye-deps [project-root] [--offline]
+# =============================================================================
+
+# Note: set -euo pipefail is set in jtoye-common.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "Dependency Health Checker" "v2.1"
+
+# =============================================================================
+# 1. Go Dependencies
+# =============================================================================
+if [[ -f "go.mod" ]]; then
+    jtoye_section "1" "Go Dependencies"
+    
+    # Check go.mod exists and is valid
+    jtoye_pass "go.mod exists"
+    
+    # Check for go.sum
+    if [[ -f "go.sum" ]]; then
+        jtoye_pass "go.sum exists (checksums verified)"
+    else
+        jtoye_warn "go.sum missing - run 'go mod tidy'"
+        inc WARNINGS
+    fi
+    
+    # Count dependencies
+    direct_deps=$(grep -cE "^\s+[a-z]" go.mod 2>/dev/null || echo 0)
+    if [[ -f "go.sum" ]]; then
+        total_deps=$(wc -l < go.sum)
+        total_deps=$((total_deps / 2))  # Each dep has 2 lines
+    else
+        total_deps=$direct_deps
+    fi
+    
+    jtoye_info "Direct dependencies: ~$direct_deps"
+    jtoye_info "Total dependencies (including transitive): ~$total_deps"
+    
+    # Check for outdated (if go is available)
+    if command -v go &> /dev/null; then
+        # Check for module updates (with timeout to prevent hanging)
+        jtoye_info "Checking for outdated modules..."
+        
+        if skip_if_offline; then
+            jtoye_info "Skipping online checks (offline mode)"
+        else
+            outdated_output=$(run_with_timeout 60 go list -m -u all 2>/dev/null) || outdated_output=""
+            outdated=$(echo "$outdated_output" | grep -c "\[" || echo 0)
+            
+            if [[ $outdated -gt 0 ]]; then
+                jtoye_warn "$outdated module(s) have updates available"
+                inc WARNINGS
+            else
+                jtoye_pass "All modules up to date"
+            fi
+        fi
+        
+        # Run go mod verify
+        if go mod verify &> /dev/null; then
+            jtoye_pass "go mod verify passed"
+        else
+            jtoye_fail "go mod verify failed"
+            inc ERRORS
+        fi
+    else
+        jtoye_skip "Go not installed - skipping version checks"
+    fi
+    
+    # Check for replace directives (potential issues)
+    replaces=$(grep -c "^replace" go.mod 2>/dev/null || echo 0)
+    if [[ $replaces -gt 0 ]]; then
+        jtoye_warn "$replaces replace directive(s) in go.mod"
+        inc WARNINGS
+    fi
+fi
+
+# =============================================================================
+# 2. Python Dependencies
+# =============================================================================
+if [[ -f "requirements.txt" ]] || [[ -f "pyproject.toml" ]]; then
+    jtoye_section "2" "Python Dependencies"
+    
+    # Check for requirements.txt
+    if [[ -f "requirements.txt" ]]; then
+        jtoye_pass "requirements.txt exists"
+        
+        dep_count=$(grep -cvE "^#|^$" requirements.txt 2>/dev/null || echo 0)
+        jtoye_info "Direct dependencies: $dep_count"
+        
+        # Check for pinned versions
+        pinned=$(grep -c "==" requirements.txt 2>/dev/null || echo 0)
+        unpinned=$((dep_count - pinned))
+        
+        if [[ $unpinned -gt 0 ]]; then
+            jtoye_warn "$unpinned unpinned dependencies (use == for reproducibility)"
+            inc WARNINGS
+        else
+            jtoye_pass "All dependencies pinned"
+        fi
+    fi
+    
+    # Check for pyproject.toml
+    if [[ -f "pyproject.toml" ]]; then
+        jtoye_pass "pyproject.toml exists (modern Python packaging)"
+    fi
+    
+    # Check for lock file
+    if [[ -f "poetry.lock" ]]; then
+        jtoye_pass "poetry.lock exists"
+    elif [[ -f "Pipfile.lock" ]]; then
+        jtoye_pass "Pipfile.lock exists"
+    elif [[ -f "requirements.txt" ]]; then
+        jtoye_info "Consider using poetry or pipenv for dependency locking"
+    fi
+    
+    # Run pip-audit if available (with timeout)
+    if command -v pip-audit &> /dev/null; then
+        jtoye_info "Running pip-audit..."
+        
+        if skip_if_offline; then
+            jtoye_info "Skipping pip-audit (offline mode)"
+        else
+            audit_result=$(run_with_timeout 60 pip-audit -r requirements.txt 2>&1) || audit_result=""
+            
+            if echo "$audit_result" | grep -q "No known vulnerabilities"; then
+                jtoye_pass "No known vulnerabilities (pip-audit)"
+            elif echo "$audit_result" | grep -qE "found [0-9]+ vulnerabilit"; then
+                vuln_count=$(echo "$audit_result" | grep -oE "[0-9]+ vulnerabilit" | head -1)
+                jtoye_fail "pip-audit: $vuln_count found"
+                inc ERRORS
+            fi
+        fi
+    else
+        jtoye_info "pip-audit not installed - skipping vulnerability scan"
+    fi
+fi
+
+# =============================================================================
+# 3. Node.js Dependencies
+# =============================================================================
+if [[ -f "package.json" ]]; then
+    jtoye_section "3" "Node.js Dependencies"
+    
+    jtoye_pass "package.json exists"
+    
+    # Count dependencies (using json_value for jq fallback)
+    deps=$(json_value '.dependencies | length // 0' package.json)
+    dev_deps=$(json_value '.devDependencies | length // 0' package.json)
+    
+    jtoye_info "Dependencies: $deps"
+    jtoye_info "DevDependencies: $dev_deps"
+    
+    # Check for lock file
+    if [[ -f "pnpm-lock.yaml" ]]; then
+        jtoye_pass "pnpm-lock.yaml exists"
+        PACKAGE_MANAGER="pnpm"
+    elif [[ -f "yarn.lock" ]]; then
+        jtoye_pass "yarn.lock exists"
+        PACKAGE_MANAGER="yarn"
+    elif [[ -f "package-lock.json" ]]; then
+        jtoye_pass "package-lock.json exists"
+        PACKAGE_MANAGER="npm"
+    else
+        jtoye_warn "No lock file found - dependencies not locked"
+        inc WARNINGS
+        PACKAGE_MANAGER="npm"
+    fi
+    
+    # Check engines field
+    engines=$(json_value '.engines' package.json)
+    if [[ -n "$engines" ]] && [[ "$engines" != "null" ]]; then
+        jtoye_pass "Node version specified in engines"
+    else
+        jtoye_info "Consider specifying node version in engines field"
+    fi
+    
+    # Run npm audit with timeout (skip in offline mode)
+    if command -v npm &> /dev/null; then
+        jtoye_info "Running npm audit..."
+        
+        if skip_if_offline; then
+            jtoye_info "Skipping npm audit (offline mode)"
+        else
+            # Use run_with_timeout instead of manual timeout
+            audit_output=$(run_with_timeout 30 npm audit --json 2>/dev/null) || audit_output='{"error": true}'
+            
+            error_check=$(json_value '.error' <<< "$audit_output")
+            if [[ "$error_check" == "true" ]]; then
+                jtoye_info "npm audit did not complete (may need 'npm install' first)"
+            else
+                total_vulns=$(json_value '.metadata.vulnerabilities.total // 0' <<< "$audit_output")
+                high_vulns=$(json_value '.metadata.vulnerabilities.high // 0' <<< "$audit_output")
+                critical_vulns=$(json_value '.metadata.vulnerabilities.critical // 0' <<< "$audit_output")
+                
+                if [[ $critical_vulns -gt 0 ]]; then
+                    jtoye_fail "npm audit: $critical_vulns critical vulnerabilities"
+                    inc ERRORS
+                elif [[ $high_vulns -gt 0 ]]; then
+                    jtoye_warn "npm audit: $high_vulns high severity vulnerabilities"
+                    inc WARNINGS
+                elif [[ $total_vulns -gt 0 ]]; then
+                    jtoye_warn "npm audit: $total_vulns vulnerabilities (review recommended)"
+                inc WARNINGS
+            else
+                jtoye_pass "No npm audit vulnerabilities"
+            fi
+        fi
+    fi
+    
+    # Check for outdated (quick check via package.json patterns)
+    if grep -qE '"[~^]' package.json; then
+        jtoye_info "Uses semver ranges - run '$PACKAGE_MANAGER outdated' to check for updates"
+    fi
+fi
+
+# =============================================================================
+# 4. Rust Dependencies
+# =============================================================================
+if [[ -f "Cargo.toml" ]]; then
+    jtoye_section "4" "Rust Dependencies"
+    
+    jtoye_pass "Cargo.toml exists"
+    
+    if [[ -f "Cargo.lock" ]]; then
+        jtoye_pass "Cargo.lock exists"
+        
+        dep_count=$(grep -c "\[\[package\]\]" Cargo.lock 2>/dev/null || echo 0)
+        jtoye_info "Total packages in Cargo.lock: $dep_count"
+    else
+        jtoye_warn "Cargo.lock not found"
+        inc WARNINGS
+    fi
+    
+    # Run cargo audit if available
+    if command -v cargo-audit &> /dev/null; then
+        jtoye_info "Running cargo audit..."
+        if cargo audit &> /dev/null; then
+            jtoye_pass "No vulnerabilities (cargo audit)"
+        else
+            jtoye_fail "cargo audit found vulnerabilities"
+            inc ERRORS
+        fi
+    fi
+fi
+
+# =============================================================================
+# 5. Docker Base Images
+# =============================================================================
+jtoye_section "5" "Docker Dependencies"
+
+dockerfiles=$(find . -name "Dockerfile*" ! -path "./vendor/*" ! -path "./node_modules/*" 2>/dev/null)
+
+if [[ -n "$dockerfiles" ]]; then
+    while IFS= read -r dockerfile; do
+        jtoye_info "Checking $dockerfile..."
+        
+        # Extract base images
+        while IFS= read -r from_line; do
+            image=$(echo "$from_line" | awk '{print $2}')
+            
+            # Check for latest tag (bad practice)
+            if [[ "$image" == *":latest" ]] || [[ "$image" != *":"* ]]; then
+                jtoye_warn "Unpinned image tag: $image"
+                inc WARNINGS
+            else
+                jtoye_pass "Pinned base image: $image"
+            fi
+        done < <(grep -E "^FROM" "$dockerfile" 2>/dev/null)
+        
+    done <<< "$dockerfiles"
+else
+    jtoye_skip "No Dockerfiles found"
+fi
+
+# =============================================================================
+# 6. License Compliance
+# =============================================================================
+jtoye_section "6" "License Check"
+
+# Quick check for common restrictive licenses in dependencies
+if [[ -f "package.json" ]]; then
+    if command -v npx &> /dev/null && [[ -d "node_modules" ]]; then
+        jtoye_info "Checking licenses (this may take a moment)..."
+        
+        # Use license-checker if available
+        licenses=$(timeout 30s npx license-checker --summary 2>/dev/null || echo "")
+        
+        if [[ -n "$licenses" ]]; then
+            if echo "$licenses" | grep -qiE "GPL|AGPL"; then
+                jtoye_warn "Copyleft licenses detected (GPL/AGPL) - verify compliance"
+                inc WARNINGS
+            else
+                jtoye_pass "No copyleft licenses detected"
+            fi
+        fi
+    fi
+fi
+
+# =============================================================================
+# 7. Dependency Size
+# =============================================================================
+jtoye_section "7" "Dependency Size"
+
+if [[ -d "node_modules" ]]; then
+    nm_size=$(du -sh node_modules 2>/dev/null | cut -f1)
+    jtoye_info "node_modules size: $nm_size"
+    
+    # Warn if huge
+    nm_bytes=$(du -sb node_modules 2>/dev/null | cut -f1 || echo 0)
+    if [[ $nm_bytes -gt 500000000 ]]; then  # 500MB
+        jtoye_warn "node_modules is over 500MB - review dependencies"
+        inc WARNINGS
+    fi
+fi
+
+if [[ -d "vendor" ]]; then
+    vendor_size=$(du -sh vendor 2>/dev/null | cut -f1)
+    jtoye_info "vendor/ size: $vendor_size"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "Dependency Health Checker"

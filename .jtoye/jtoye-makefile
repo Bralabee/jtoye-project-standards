@@ -1,0 +1,230 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Makefile Checker v2.1
+# =============================================================================
+# Validates Makefile presence and quality for build automation.
+#
+# Usage: jtoye-makefile [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "Makefile Checker" "v2.0"
+
+# =============================================================================
+# 1. Makefile Existence
+# =============================================================================
+jtoye_section "1" "Makefile Presence"
+
+if [[ -f "Makefile" ]]; then
+    jtoye_pass "Makefile exists"
+    MAKEFILE="Makefile"
+elif [[ -f "makefile" ]]; then
+    jtoye_pass "makefile exists (lowercase)"
+    MAKEFILE="makefile"
+elif [[ -f "GNUmakefile" ]]; then
+    jtoye_pass "GNUmakefile exists"
+    MAKEFILE="GNUmakefile"
+else
+    jtoye_info "No Makefile found"
+    jtoye_info "Consider adding a Makefile for common tasks"
+    jtoye_summary 0 0 "Makefile Checker"
+    exit 0
+fi
+
+# =============================================================================
+# 2. Common Targets
+# =============================================================================
+jtoye_section "2" "Common Targets"
+
+# Essential targets to check for
+ESSENTIAL_TARGETS=("all" "build" "test" "clean")
+RECOMMENDED_TARGETS=("install" "dev" "lint" "format" "run" "help")
+
+# Extract targets from Makefile
+targets=$(grep -E "^[a-zA-Z_-]+:" "$MAKEFILE" | sed 's/:.*//' | sort -u)
+
+for target in "${ESSENTIAL_TARGETS[@]}"; do
+    if echo "$targets" | grep -q "^$target$"; then
+        jtoye_pass "Has '$target' target"
+    else
+        jtoye_info "Missing '$target' target"
+    fi
+done
+
+for target in "${RECOMMENDED_TARGETS[@]}"; do
+    if echo "$targets" | grep -q "^$target$"; then
+        jtoye_pass "Has '$target' target"
+    fi
+done
+
+# Count total targets
+target_count=$(echo "$targets" | wc -l)
+jtoye_info "Total targets: $target_count"
+
+# =============================================================================
+# 3. Help Target
+# =============================================================================
+jtoye_section "3" "Help Documentation"
+
+if grep -q "^help:" "$MAKEFILE"; then
+    jtoye_pass "Has 'help' target"
+    
+    # Check if help is self-documenting
+    if grep -qE "@echo|##" "$MAKEFILE"; then
+        jtoye_pass "Help appears to be documented"
+    fi
+else
+    jtoye_info "Consider adding a 'help' target"
+fi
+
+# Check for target comments
+commented_targets=$(grep -cE "^## |^#.*:" "$MAKEFILE" 2>/dev/null | head -1 || echo 0)
+commented_targets=${commented_targets:-0}
+if [[ $commented_targets -gt 3 ]]; then
+    jtoye_pass "Targets have documentation comments ($commented_targets)"
+fi
+
+# =============================================================================
+# 4. Variables
+# =============================================================================
+jtoye_section "4" "Variables"
+
+# Check for common variables
+if grep -qE "^[A-Z_]+\s*[:?]?=" "$MAKEFILE"; then
+    var_count=$(grep -cE "^[A-Z_]+\s*[:?]?=" "$MAKEFILE")
+    jtoye_pass "Uses variables ($var_count defined)"
+    
+    # Check for overridable variables (?=)
+    if grep -q "?=" "$MAKEFILE"; then
+        jtoye_pass "Has overridable variables (?=)"
+    fi
+else
+    jtoye_info "Consider using variables for paths/commands"
+fi
+
+# =============================================================================
+# 5. PHONY Declarations
+# =============================================================================
+jtoye_section "5" "PHONY Declarations"
+
+if grep -q "^\.PHONY:" "$MAKEFILE"; then
+    phony_count=$(grep -E "^\.PHONY:" "$MAKEFILE" | wc -l)
+    jtoye_pass "Uses .PHONY declarations ($phony_count)"
+else
+    jtoye_warn "No .PHONY declarations - may cause issues with file-named targets"
+    inc WARNINGS
+fi
+
+# =============================================================================
+# 6. Docker Integration
+# =============================================================================
+jtoye_section "6" "Docker Integration"
+
+if grep -qE "docker|Docker" "$MAKEFILE"; then
+    jtoye_pass "Has Docker-related targets"
+    
+    # Common Docker targets
+    for target in "docker-build" "docker-run" "docker-up" "docker-down"; do
+        if echo "$targets" | grep -qi "$target"; then
+            jtoye_pass "Has '$target' target"
+        fi
+    done
+fi
+
+# =============================================================================
+# 7. Environment Handling
+# =============================================================================
+jtoye_section "7" "Environment Handling"
+
+# Check for env file loading
+if grep -qE "include.*\.env|ifneq.*wildcard.*\.env" "$MAKEFILE"; then
+    jtoye_pass "Handles .env file loading"
+fi
+
+# Check for environment-specific targets
+if grep -qE "dev|prod|staging|test" "$MAKEFILE"; then
+    jtoye_pass "Has environment-specific targets"
+fi
+
+# =============================================================================
+# 8. Dependency Targets
+# =============================================================================
+jtoye_section "8" "Dependency Management"
+
+dep_targets=("deps" "install" "install-deps" "setup" "init" "vendor")
+
+for target in "${dep_targets[@]}"; do
+    if echo "$targets" | grep -qi "^$target$"; then
+        jtoye_pass "Has '$target' target for dependencies"
+        break
+    fi
+done
+
+# =============================================================================
+# 9. Quality Checks
+# =============================================================================
+jtoye_section "9" "Quality Integration"
+
+quality_targets=("lint" "format" "fmt" "check" "verify" "test" "coverage" "audit")
+quality_found=0
+
+for target in "${quality_targets[@]}"; do
+    if echo "$targets" | grep -qi "^$target$"; then
+        inc quality_found
+    fi
+done
+
+if [[ $quality_found -ge 3 ]]; then
+    jtoye_pass "Good quality target coverage ($quality_found targets)"
+elif [[ $quality_found -gt 0 ]]; then
+    jtoye_pass "Has some quality targets ($quality_found)"
+else
+    jtoye_info "Consider adding lint/format/test targets"
+fi
+
+# =============================================================================
+# 10. Syntax Check
+# =============================================================================
+jtoye_section "10" "Syntax Validation"
+
+# Check for common syntax issues
+if grep -qE "^\t\t" "$MAKEFILE"; then
+    jtoye_info "Has double tabs (may be intentional)"
+fi
+
+# Check for spaces instead of tabs (common mistake)
+if grep -qE "^    [a-z]" "$MAKEFILE"; then
+    jtoye_warn "Possible spaces instead of tabs in recipes"
+    inc WARNINGS
+fi
+
+# Validate with make -n if available
+if command -v make &> /dev/null; then
+    if make -n -f "$MAKEFILE" > /dev/null 2>&1; then
+        jtoye_pass "Makefile syntax is valid"
+    else
+        # Try with default target
+        first_target=$(head -20 "$MAKEFILE" | grep -E "^[a-z].*:" | head -1 | sed 's/:.*//')
+        if [[ -n "$first_target" ]]; then
+            if make -n "$first_target" > /dev/null 2>&1; then
+                jtoye_pass "Makefile syntax appears valid"
+            else
+                jtoye_warn "Makefile may have syntax issues (dry-run failed)"
+                inc WARNINGS
+            fi
+        fi
+    fi
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "Makefile Checker"

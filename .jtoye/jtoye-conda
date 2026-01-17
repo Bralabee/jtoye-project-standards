@@ -1,0 +1,255 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - Conda Environment Checker v2.1
+# =============================================================================
+# Validates Conda environment configuration and consistency.
+#
+# Usage: jtoye-conda [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "Conda Environment Checker" "v2.0"
+
+# =============================================================================
+# 1. Conda Installation
+# =============================================================================
+jtoye_section "1" "Conda Installation"
+
+if command -v conda &> /dev/null; then
+    CONDA_VERSION=$(conda --version 2>/dev/null | awk '{print $2}')
+    jtoye_pass "Conda installed (version $CONDA_VERSION)"
+    
+    # Check if initialized
+    if [[ -n "$CONDA_DEFAULT_ENV" ]]; then
+        jtoye_pass "Conda is initialized (current env: $CONDA_DEFAULT_ENV)"
+    else
+        jtoye_info "No Conda environment currently active"
+    fi
+else
+    jtoye_warn "Conda not installed or not in PATH"
+    inc WARNINGS
+    jtoye_summary $ERRORS $WARNINGS "Conda Environment Checker"
+    exit 0
+fi
+
+# =============================================================================
+# 2. Environment File
+# =============================================================================
+jtoye_section "2" "Environment Configuration"
+
+ENV_FILE=""
+for file in "environment.yml" "environment.yaml" "conda.yml" "conda.yaml"; do
+    if [[ -f "$file" ]]; then
+        ENV_FILE="$file"
+        break
+    fi
+done
+
+if [[ -n "$ENV_FILE" ]]; then
+    jtoye_pass "Environment file found: $ENV_FILE"
+    
+    # Extract environment name
+    ENV_NAME=$(grep -E "^name:" "$ENV_FILE" | awk '{print $2}')
+    if [[ -n "$ENV_NAME" ]]; then
+        jtoye_info "Environment name: $ENV_NAME"
+    else
+        jtoye_warn "No environment name specified in $ENV_FILE"
+        inc WARNINGS
+    fi
+    
+    # Check for channels
+    if grep -q "channels:" "$ENV_FILE"; then
+        jtoye_pass "Channels specified in $ENV_FILE"
+        
+        # Check for conda-forge (recommended)
+        if grep -q "conda-forge" "$ENV_FILE"; then
+            jtoye_pass "conda-forge channel included"
+        fi
+    else
+        jtoye_info "No channels specified - will use defaults"
+    fi
+    
+    # Count dependencies
+    dep_count=$(grep -E "^\s+-\s+" "$ENV_FILE" | wc -l)
+    jtoye_info "Dependencies listed: ~$dep_count"
+    
+    # Check for pip dependencies
+    if grep -q "pip:" "$ENV_FILE" || grep -qE "^\s+-\s+pip$" "$ENV_FILE"; then
+        pip_deps=$(grep -A1000 "pip:" "$ENV_FILE" 2>/dev/null | grep -E "^\s+-\s+" | wc -l)
+        if [[ $pip_deps -gt 0 ]]; then
+            jtoye_info "Pip dependencies: ~$pip_deps"
+        fi
+    fi
+else
+    jtoye_info "No environment.yml found"
+    
+    # Check for requirements.txt as fallback
+    if [[ -f "requirements.txt" ]]; then
+        jtoye_info "requirements.txt exists - can be used with conda"
+    fi
+fi
+
+# =============================================================================
+# 3. Project-Specific Environment
+# =============================================================================
+jtoye_section "3" "Project Environment"
+
+PROJECT_NAME=$(basename "$PROJECT_ROOT")
+
+# Check if project has a dedicated environment
+if conda env list 2>/dev/null | grep -q "$PROJECT_NAME"; then
+    jtoye_pass "Project environment '$PROJECT_NAME' exists"
+    
+    # Check if it matches env file
+    if [[ -n "$ENV_NAME" ]] && [[ "$ENV_NAME" != "$PROJECT_NAME" ]]; then
+        jtoye_warn "Environment name '$ENV_NAME' differs from project name '$PROJECT_NAME'"
+        inc WARNINGS
+    fi
+elif [[ -n "$ENV_NAME" ]] && conda env list 2>/dev/null | grep -q "$ENV_NAME"; then
+    jtoye_pass "Environment '$ENV_NAME' exists"
+else
+    jtoye_info "No dedicated project environment found"
+    jtoye_info "Create with: conda env create -f $ENV_FILE"
+fi
+
+# =============================================================================
+# 4. Python Version
+# =============================================================================
+jtoye_section "4" "Python Version"
+
+if [[ -n "$ENV_FILE" ]]; then
+    # Check Python version specification
+    py_version=$(grep -E "^\s+-\s+python[=<>]" "$ENV_FILE" | head -1)
+    
+    if [[ -n "$py_version" ]]; then
+        jtoye_pass "Python version specified: $py_version"
+    else
+        jtoye_info "No specific Python version in $ENV_FILE"
+    fi
+fi
+
+# Check current Python if in environment
+if [[ -n "$CONDA_DEFAULT_ENV" ]] && [[ "$CONDA_DEFAULT_ENV" != "base" ]]; then
+    current_py=$(python --version 2>/dev/null | awk '{print $2}')
+    if [[ -n "$current_py" ]]; then
+        jtoye_info "Current Python version: $current_py"
+    fi
+fi
+
+# =============================================================================
+# 5. Package Consistency
+# =============================================================================
+jtoye_section "5" "Package Consistency"
+
+if [[ -n "$ENV_FILE" ]] && [[ -f "requirements.txt" ]]; then
+    # Check for packages in requirements.txt but not in environment.yml
+    missing_count=0
+    
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^# ]] && continue
+        [[ -z "$line" ]] && continue
+        
+        # Extract package name (before ==, >=, etc.)
+        pkg=$(echo "$line" | sed 's/[=<>].*//' | tr '[:upper:]' '[:lower:]')
+        
+        if ! grep -qi "$pkg" "$ENV_FILE" 2>/dev/null; then
+            inc missing_count
+        fi
+    done < requirements.txt
+    
+    if [[ $missing_count -gt 0 ]]; then
+        jtoye_warn "$missing_count package(s) in requirements.txt not in $ENV_FILE"
+        inc WARNINGS
+    else
+        jtoye_pass "requirements.txt packages present in $ENV_FILE"
+    fi
+fi
+
+# =============================================================================
+# 6. Lock File
+# =============================================================================
+jtoye_section "6" "Lock File"
+
+if [[ -f "conda-lock.yml" ]] || [[ -f "conda-lock.yaml" ]]; then
+    jtoye_pass "conda-lock file present (reproducible builds)"
+elif [[ -f "environment.lock.yml" ]] || [[ -f "environment.lock.yaml" ]]; then
+    jtoye_pass "Environment lock file present"
+else
+    jtoye_info "No lock file - consider using conda-lock for reproducibility"
+fi
+
+# =============================================================================
+# 7. Virtual Environment Check
+# =============================================================================
+jtoye_section "7" "Virtual Environment"
+
+# Check for conflicting venv
+if [[ -d ".venv" ]] || [[ -d "venv" ]]; then
+    if [[ -n "$ENV_FILE" ]]; then
+        jtoye_warn "Both Conda env and Python venv detected - potential conflict"
+        inc WARNINGS
+    else
+        jtoye_info "Python venv found (no Conda env file)"
+    fi
+fi
+
+# Check if currently in correct environment
+if [[ -n "$ENV_NAME" ]] && [[ -n "$CONDA_DEFAULT_ENV" ]]; then
+    if [[ "$CONDA_DEFAULT_ENV" == "$ENV_NAME" ]]; then
+        jtoye_pass "Currently in project environment: $ENV_NAME"
+    else
+        jtoye_info "Currently in '$CONDA_DEFAULT_ENV' - project expects '$ENV_NAME'"
+    fi
+fi
+
+# =============================================================================
+# 8. Common ML Packages
+# =============================================================================
+jtoye_section "8" "ML/Data Science Packages"
+
+if [[ -n "$ENV_FILE" ]]; then
+    ML_PACKAGES=("numpy" "pandas" "scikit-learn" "tensorflow" "pytorch" "torch" "matplotlib" "seaborn")
+    ml_found=0
+    
+    for pkg in "${ML_PACKAGES[@]}"; do
+        if grep -qi "$pkg" "$ENV_FILE"; then
+            inc ml_found
+        fi
+    done
+    
+    if [[ $ml_found -gt 0 ]]; then
+        jtoye_pass "ML/Data science packages present ($ml_found common packages)"
+    fi
+fi
+
+# =============================================================================
+# 9. Export Check
+# =============================================================================
+jtoye_section "9" "Environment Export"
+
+# Check if environment was exported with --from-history (cleaner)
+if [[ -n "$ENV_FILE" ]]; then
+    # Exported envs usually have more specific version pins
+    full_pins=$(grep -cE "=[0-9]" "$ENV_FILE" 2>/dev/null || echo 0)
+    
+    if [[ $full_pins -gt 10 ]]; then
+        jtoye_info "Environment appears to be a full export ($full_pins version pins)"
+        jtoye_info "Consider using 'conda env export --from-history' for cleaner file"
+    else
+        jtoye_pass "Environment file is clean/minimal"
+    fi
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "Conda Environment Checker"

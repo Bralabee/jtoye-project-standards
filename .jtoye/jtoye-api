@@ -1,0 +1,274 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - API Contract Validator v2.1
+# =============================================================================
+# Validates API contracts, endpoint definitions, and request/response schemas.
+#
+# Usage: jtoye-api [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "API Contract Validator" "v2.0"
+
+# =============================================================================
+# 1. OpenAPI/Swagger Check
+# =============================================================================
+jtoye_section "1" "OpenAPI/Swagger Specification"
+
+OPENAPI_FILE=""
+for spec in "openapi.yaml" "openapi.yml" "openapi.json" "swagger.yaml" "swagger.yml" "swagger.json" "api/openapi.yaml" "docs/openapi.yaml"; do
+    if [[ -f "$spec" ]]; then
+        OPENAPI_FILE="$spec"
+        jtoye_pass "OpenAPI spec found: $spec"
+        break
+    fi
+done
+
+if [[ -z "$OPENAPI_FILE" ]]; then
+    jtoye_info "No OpenAPI/Swagger specification found"
+else
+    # Validate OpenAPI structure (basic check)
+    if grep -q "openapi:" "$OPENAPI_FILE" || grep -q '"openapi"' "$OPENAPI_FILE"; then
+        jtoye_pass "Valid OpenAPI 3.x format"
+    elif grep -q "swagger:" "$OPENAPI_FILE" || grep -q '"swagger"' "$OPENAPI_FILE"; then
+        jtoye_info "Swagger 2.x format (consider upgrading to OpenAPI 3)"
+    fi
+    
+    # Check for paths
+    if grep -q "paths:" "$OPENAPI_FILE" || grep -q '"paths"' "$OPENAPI_FILE"; then
+        path_count=$(grep -cE "^\s{2,4}/|\"/" "$OPENAPI_FILE" 2>/dev/null || echo 0)
+        jtoye_pass "API defines endpoints (~$path_count paths)"
+    fi
+fi
+
+# =============================================================================
+# 2. Go API Handlers
+# =============================================================================
+jtoye_section "2" "Go API Handlers"
+
+if [[ -f "go.mod" ]]; then
+    # Find handler files
+    handler_files=$(find . -type f -name "*.go" \
+        ! -path "./vendor/*" ! -path "./.git/*" \
+        -exec grep -l "func.*Handler\|http.HandlerFunc\|gin.Context\|echo.Context\|fiber.Ctx" {} \; 2>/dev/null | wc -l)
+    
+    if [[ $handler_files -gt 0 ]]; then
+        jtoye_pass "Found $handler_files file(s) with HTTP handlers"
+        
+        # Check for handler documentation
+        documented=$(grep -r $JTOYE_GREP_EXCLUDE -B1 "func.*Handler" --include="*.go" 2>/dev/null | grep -c "// " || echo 0)
+        if [[ $documented -gt 0 ]]; then
+            jtoye_pass "Handler functions have comments ($documented)"
+        else
+            jtoye_warn "Consider documenting handler functions"
+            inc WARNINGS
+        fi
+    fi
+    
+    # Check for route definitions
+    routes=$(grep -r $JTOYE_GREP_EXCLUDE -E "(GET|POST|PUT|DELETE|PATCH)\(" --include="*.go" 2>/dev/null | wc -l)
+    if [[ $routes -gt 0 ]]; then
+        jtoye_pass "Found ~$routes route definition(s)"
+    fi
+else
+    jtoye_skip "No Go project detected"
+fi
+
+# =============================================================================
+# 3. Python API Endpoints
+# =============================================================================
+jtoye_section "3" "Python API Endpoints"
+
+if [[ -f "requirements.txt" ]] || [[ -f "pyproject.toml" ]]; then
+    # Check for FastAPI
+    if grep -q "fastapi" requirements.txt 2>/dev/null || grep -q "fastapi" pyproject.toml 2>/dev/null; then
+        jtoye_pass "FastAPI framework detected"
+        
+        # Count endpoints
+        endpoints=$(grep -r $JTOYE_GREP_EXCLUDE -E "@(app|router)\.(get|post|put|delete|patch)" --include="*.py" 2>/dev/null | wc -l)
+        if [[ $endpoints -gt 0 ]]; then
+            jtoye_pass "Found ~$endpoints FastAPI endpoint(s)"
+        fi
+        
+        # Check for Pydantic models
+        models=$(grep -r $JTOYE_GREP_EXCLUDE "class.*BaseModel" --include="*.py" 2>/dev/null | wc -l)
+        if [[ $models -gt 0 ]]; then
+            jtoye_pass "Found $models Pydantic model(s) for validation"
+        fi
+    fi
+    
+    # Check for Flask
+    if grep -q "flask" requirements.txt 2>/dev/null || grep -q "flask" pyproject.toml 2>/dev/null; then
+        jtoye_pass "Flask framework detected"
+        
+        endpoints=$(grep -r $JTOYE_GREP_EXCLUDE -E "@(app|bp)\.(route|get|post|put|delete)" --include="*.py" 2>/dev/null | wc -l)
+        if [[ $endpoints -gt 0 ]]; then
+            jtoye_pass "Found ~$endpoints Flask endpoint(s)"
+        fi
+    fi
+    
+    # Check for Django REST
+    if grep -q "djangorestframework" requirements.txt 2>/dev/null; then
+        jtoye_pass "Django REST Framework detected"
+        
+        viewsets=$(grep -r $JTOYE_GREP_EXCLUDE "class.*ViewSet\|class.*APIView" --include="*.py" 2>/dev/null | wc -l)
+        if [[ $viewsets -gt 0 ]]; then
+            jtoye_pass "Found $viewsets ViewSet/APIView class(es)"
+        fi
+    fi
+else
+    jtoye_skip "No Python project detected"
+fi
+
+# =============================================================================
+# 4. Node.js/TypeScript API
+# =============================================================================
+jtoye_section "4" "Node.js/TypeScript API"
+
+if [[ -f "package.json" ]]; then
+    # Check for Express
+    if grep -q '"express"' package.json; then
+        jtoye_pass "Express.js framework detected"
+        
+        routes=$(grep -r $JTOYE_GREP_EXCLUDE -E "(app|router)\.(get|post|put|delete|patch)" \
+            --include="*.ts" --include="*.js" 2>/dev/null | wc -l)
+        if [[ $routes -gt 0 ]]; then
+            jtoye_pass "Found ~$routes Express route(s)"
+        fi
+    fi
+    
+    # Check for Next.js API routes
+    if [[ -d "app/api" ]] || [[ -d "pages/api" ]]; then
+        jtoye_pass "Next.js API routes directory found"
+        
+        if [[ -d "app/api" ]]; then
+            api_routes=$(find app/api -name "route.ts" -o -name "route.js" 2>/dev/null | wc -l)
+        else
+            api_routes=$(find pages/api -name "*.ts" -o -name "*.js" 2>/dev/null | wc -l)
+        fi
+        jtoye_pass "Found $api_routes API route file(s)"
+    fi
+    
+    # Check for tRPC
+    if grep -q '"@trpc/server"' package.json; then
+        jtoye_pass "tRPC framework detected"
+        
+        procedures=$(grep -r $JTOYE_GREP_EXCLUDE -E "\.query\(|\.mutation\(" \
+            --include="*.ts" 2>/dev/null | wc -l)
+        if [[ $procedures -gt 0 ]]; then
+            jtoye_pass "Found ~$procedures tRPC procedure(s)"
+        fi
+    fi
+    
+    # Check for Zod validation
+    if grep -q '"zod"' package.json; then
+        jtoye_pass "Zod schema validation present"
+    fi
+else
+    jtoye_skip "No Node.js project detected"
+fi
+
+# =============================================================================
+# 5. API Versioning
+# =============================================================================
+jtoye_section "5" "API Versioning"
+
+# Check for versioned paths
+versioned=$(grep -r $JTOYE_GREP_EXCLUDE -E "/v[0-9]+/|/api/v[0-9]" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" \
+    --include="*.yaml" --include="*.yml" 2>/dev/null | head -1)
+
+if [[ -n "$versioned" ]]; then
+    jtoye_pass "API versioning detected in paths"
+else
+    jtoye_info "No API versioning found (consider /v1/, /v2/ prefixes)"
+fi
+
+# =============================================================================
+# 6. Error Handling
+# =============================================================================
+jtoye_section "6" "Error Response Patterns"
+
+# Check for consistent error handling
+error_handlers=$(grep -r $JTOYE_GREP_EXCLUDE -E "ErrorResponse|APIError|HttpException|HTTPException" \
+    --include="*.go" --include="*.py" --include="*.ts" 2>/dev/null | wc -l)
+
+if [[ $error_handlers -gt 0 ]]; then
+    jtoye_pass "Custom error handling found ($error_handlers references)"
+else
+    jtoye_info "Consider standardizing API error responses"
+fi
+
+# Check for status code constants
+status_codes=$(grep -r $JTOYE_GREP_EXCLUDE -E "http\.(Status|STATUS_)|status_code|statusCode|HttpStatus" \
+    --include="*.go" --include="*.py" --include="*.ts" 2>/dev/null | wc -l)
+
+if [[ $status_codes -gt 5 ]]; then
+    jtoye_pass "HTTP status codes used consistently ($status_codes references)"
+fi
+
+# =============================================================================
+# 7. Authentication Middleware
+# =============================================================================
+jtoye_section "7" "Authentication"
+
+auth_patterns=$(grep -r $JTOYE_GREP_EXCLUDE -E "Bearer|JWT|AuthMiddleware|auth.*middleware|requireAuth|Authenticate" \
+    --include="*.go" --include="*.py" --include="*.ts" --include="*.js" 2>/dev/null | wc -l)
+
+if [[ $auth_patterns -gt 0 ]]; then
+    jtoye_pass "Authentication patterns found ($auth_patterns references)"
+    
+    # Check for auth in OpenAPI
+    if [[ -n "$OPENAPI_FILE" ]]; then
+        if grep -qE "securitySchemes|security:" "$OPENAPI_FILE"; then
+            jtoye_pass "OpenAPI spec includes security definitions"
+        else
+            jtoye_warn "OpenAPI spec missing security definitions"
+            inc WARNINGS
+        fi
+    fi
+else
+    jtoye_info "No authentication middleware detected"
+fi
+
+# =============================================================================
+# 8. Request Validation
+# =============================================================================
+jtoye_section "8" "Request Validation"
+
+validation_found=false
+
+# Go validation
+if grep -r $JTOYE_GREP_EXCLUDE "validate.*required\|binding:" --include="*.go" 2>/dev/null | head -1 > /dev/null; then
+    jtoye_pass "Go struct validation tags present"
+    validation_found=true
+fi
+
+# Python validation
+if grep -r $JTOYE_GREP_EXCLUDE "Field\(.*\)\|validator\|@validates" --include="*.py" 2>/dev/null | head -1 > /dev/null; then
+    jtoye_pass "Python validation decorators/fields present"
+    validation_found=true
+fi
+
+# TypeScript validation
+if grep -r $JTOYE_GREP_EXCLUDE "z\.\|yup\.\|joi\." --include="*.ts" 2>/dev/null | head -1 > /dev/null; then
+    jtoye_pass "TypeScript schema validation present"
+    validation_found=true
+fi
+
+if [[ "$validation_found" = false ]]; then
+    jtoye_info "Consider adding request validation"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "API Contract Validator"

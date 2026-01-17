@@ -1,0 +1,296 @@
+#!/bin/bash
+# =============================================================================
+# J'Toye Digital - UI/UX Accessibility Checker v2.1
+# =============================================================================
+# Validates UI components for accessibility and UX best practices.
+#
+# Usage: jtoye-uiux [project-root]
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jtoye-common.sh"
+
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
+
+ERRORS=0
+WARNINGS=0
+
+jtoye_header "UI/UX Accessibility Checker" "v2.0"
+
+# Check if this is a frontend project
+if [[ ! -f "package.json" ]] && [[ ! -d "app" ]] && [[ ! -d "src" ]] && [[ ! -d "components" ]]; then
+    jtoye_info "No frontend project detected - skipping UI/UX checks"
+    exit 0
+fi
+
+# =============================================================================
+# 1. Image Accessibility
+# =============================================================================
+jtoye_section "1" "Image Accessibility"
+
+# Check for images without alt attributes
+img_no_alt=$(grep -r $JTOYE_GREP_EXCLUDE -E "<img[^>]*>" \
+    --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | \
+    grep -v "alt=" | wc -l)
+
+if [[ $img_no_alt -gt 0 ]]; then
+    jtoye_fail "$img_no_alt <img> tag(s) without alt attribute"
+    inc ERRORS
+else
+    jtoye_pass "All <img> tags have alt attributes"
+fi
+
+# Check for empty alt attributes (should only be for decorative images)
+img_empty_alt=$(grep -r $JTOYE_GREP_EXCLUDE -E 'alt=""' \
+    --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | wc -l)
+
+if [[ $img_empty_alt -gt 5 ]]; then
+    jtoye_info "$img_empty_alt empty alt attributes (verify decorative images only)"
+fi
+
+# =============================================================================
+# 2. Form Accessibility
+# =============================================================================
+jtoye_section "2" "Form Accessibility"
+
+# Check for inputs without labels
+inputs=$(grep -r $JTOYE_GREP_EXCLUDE -E "<input|<Input" \
+    --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | wc -l)
+
+labels=$(grep -r $JTOYE_GREP_EXCLUDE -E "<label|<Label|htmlFor|aria-label" \
+    --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | wc -l)
+
+if [[ $inputs -gt 0 ]] && [[ $labels -lt $((inputs / 2)) ]]; then
+    jtoye_warn "Low label-to-input ratio ($labels labels for $inputs inputs)"
+    inc WARNINGS
+else
+    jtoye_pass "Form inputs have associated labels"
+fi
+
+# Check for placeholder-only inputs
+placeholder_only=$(grep -r $JTOYE_GREP_EXCLUDE -E "<input[^>]*placeholder[^>]*>" \
+    --include="*.tsx" --include="*.jsx" 2>/dev/null | \
+    grep -v "aria-label\|<label" | wc -l)
+
+if [[ $placeholder_only -gt 0 ]]; then
+    jtoye_warn "$placeholder_only inputs rely only on placeholder (add labels)"
+    inc WARNINGS
+fi
+
+# =============================================================================
+# 3. Interactive Elements
+# =============================================================================
+jtoye_section "3" "Interactive Elements"
+
+# Check for clickable divs without roles
+click_divs=$(grep -r $JTOYE_GREP_EXCLUDE -E "<div[^>]*onClick" \
+    --include="*.tsx" --include="*.jsx" 2>/dev/null | \
+    grep -v "role=" | wc -l)
+
+if [[ $click_divs -gt 0 ]]; then
+    jtoye_warn "$click_divs clickable <div> without role attribute"
+    inc WARNINGS
+fi
+
+# Check for button type attributes
+buttons=$(grep -r $JTOYE_GREP_EXCLUDE -E "<button" \
+    --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | wc -l)
+
+buttons_with_type=$(grep -r $JTOYE_GREP_EXCLUDE -E '<button[^>]*type=' \
+    --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | wc -l)
+
+if [[ $buttons -gt 0 ]] && [[ $buttons_with_type -lt $((buttons / 2)) ]]; then
+    jtoye_info "Consider adding type attribute to buttons (type='button' or 'submit')"
+fi
+
+# Check for keyboard accessibility
+tabindex=$(grep -r $JTOYE_GREP_EXCLUDE "tabIndex\|tabindex" \
+    --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+
+if [[ $tabindex -gt 0 ]]; then
+    jtoye_pass "Keyboard navigation considered (tabIndex present)"
+fi
+
+# =============================================================================
+# 4. ARIA Attributes
+# =============================================================================
+jtoye_section "4" "ARIA Usage"
+
+aria_count=$(grep -r $JTOYE_GREP_EXCLUDE -E "aria-" \
+    --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | wc -l)
+
+if [[ $aria_count -gt 0 ]]; then
+    jtoye_pass "ARIA attributes used ($aria_count instances)"
+    
+    # Check for common ARIA patterns
+    aria_live=$(grep -r $JTOYE_GREP_EXCLUDE "aria-live" \
+        --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+    
+    if [[ $aria_live -gt 0 ]]; then
+        jtoye_pass "aria-live regions for dynamic content"
+    fi
+    
+    aria_describedby=$(grep -r $JTOYE_GREP_EXCLUDE "aria-describedby" \
+        --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+    
+    if [[ $aria_describedby -gt 0 ]]; then
+        jtoye_pass "aria-describedby for additional context"
+    fi
+else
+    jtoye_warn "No ARIA attributes found - review accessibility"
+    inc WARNINGS
+fi
+
+# =============================================================================
+# 5. Color Contrast Indicators
+# =============================================================================
+jtoye_section "5" "Color & Contrast"
+
+# Check for color-only indicators
+color_only=$(grep -r $JTOYE_GREP_EXCLUDE -E "color:.*red|color:.*green|text-red|text-green" \
+    --include="*.tsx" --include="*.jsx" --include="*.css" 2>/dev/null | wc -l)
+
+if [[ $color_only -gt 5 ]]; then
+    jtoye_info "Review color-only indicators ($color_only instances) - add icons/text"
+fi
+
+# Check for focus styles
+focus_styles=$(grep -r $JTOYE_GREP_EXCLUDE -E ":focus|focus:" \
+    --include="*.css" --include="*.scss" --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+
+if [[ $focus_styles -gt 0 ]]; then
+    jtoye_pass "Focus styles defined ($focus_styles rules)"
+else
+    jtoye_warn "No custom focus styles - verify default focus is visible"
+    inc WARNINGS
+fi
+
+# Check for focus-visible
+focus_visible=$(grep -r $JTOYE_GREP_EXCLUDE "focus-visible" \
+    --include="*.css" --include="*.scss" --include="*.tsx" 2>/dev/null | wc -l)
+
+if [[ $focus_visible -gt 0 ]]; then
+    jtoye_pass "Using focus-visible for keyboard-only focus"
+fi
+
+# =============================================================================
+# 6. Semantic HTML
+# =============================================================================
+jtoye_section "6" "Semantic HTML"
+
+# Check for semantic elements
+semantic_elements=("header" "nav" "main" "footer" "article" "section" "aside")
+semantic_count=0
+
+for element in "${semantic_elements[@]}"; do
+    count=$(grep -r $JTOYE_GREP_EXCLUDE -E "<$element" \
+        --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | wc -l)
+    if [[ $count -gt 0 ]]; then
+        inc semantic_count
+    fi
+done
+
+if [[ $semantic_count -ge 3 ]]; then
+    jtoye_pass "Using semantic HTML elements ($semantic_count types)"
+else
+    jtoye_info "Consider using more semantic HTML elements"
+fi
+
+# Check for heading hierarchy
+h1_count=$(grep -r $JTOYE_GREP_EXCLUDE -E "<h1|<H1" \
+    --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | wc -l)
+
+h2_count=$(grep -r $JTOYE_GREP_EXCLUDE -E "<h2|<H2" \
+    --include="*.tsx" --include="*.jsx" --include="*.html" 2>/dev/null | wc -l)
+
+if [[ $h1_count -gt 0 ]] && [[ $h2_count -gt 0 ]]; then
+    jtoye_pass "Heading hierarchy present (h1: $h1_count, h2: $h2_count)"
+fi
+
+# =============================================================================
+# 7. Loading States
+# =============================================================================
+jtoye_section "7" "Loading States"
+
+loading_indicators=$(grep -r $JTOYE_GREP_EXCLUDE -E "isLoading|loading|Spinner|Skeleton|aria-busy" \
+    --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+
+if [[ $loading_indicators -gt 0 ]]; then
+    jtoye_pass "Loading states implemented ($loading_indicators references)"
+    
+    # Check for accessible loading
+    aria_busy=$(grep -r $JTOYE_GREP_EXCLUDE "aria-busy" \
+        --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+    
+    if [[ $aria_busy -gt 0 ]]; then
+        jtoye_pass "Using aria-busy for loading states"
+    fi
+else
+    jtoye_info "Consider adding loading indicators for async operations"
+fi
+
+# =============================================================================
+# 8. Error Handling UI
+# =============================================================================
+jtoye_section "8" "Error Handling UI"
+
+# Check for error boundaries
+error_boundary=$(grep -r $JTOYE_GREP_EXCLUDE -E "ErrorBoundary|componentDidCatch" \
+    --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+
+if [[ $error_boundary -gt 0 ]]; then
+    jtoye_pass "Error boundaries implemented"
+fi
+
+# Check for error messages
+error_msg=$(grep -r $JTOYE_GREP_EXCLUDE -E "error.*message|Error.*Message|errorMessage" \
+    --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+
+if [[ $error_msg -gt 0 ]]; then
+    jtoye_pass "Error message handling present"
+fi
+
+# Check for form validation errors
+validation_errors=$(grep -r $JTOYE_GREP_EXCLUDE -E "errors\.|formErrors|validationError|aria-invalid" \
+    --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+
+if [[ $validation_errors -gt 0 ]]; then
+    jtoye_pass "Form validation error handling present"
+fi
+
+# =============================================================================
+# 9. Mobile Responsiveness
+# =============================================================================
+jtoye_section "9" "Responsiveness"
+
+# Check for responsive patterns
+media_queries=$(grep -r $JTOYE_GREP_EXCLUDE "@media\|useMediaQuery" \
+    --include="*.css" --include="*.scss" --include="*.tsx" 2>/dev/null | wc -l)
+
+if [[ $media_queries -gt 0 ]]; then
+    jtoye_pass "Media queries present ($media_queries)"
+fi
+
+# Tailwind responsive classes
+if [[ -f "tailwind.config.ts" ]] || [[ -f "tailwind.config.js" ]]; then
+    responsive_classes=$(grep -r $JTOYE_GREP_EXCLUDE -E "sm:|md:|lg:|xl:" \
+        --include="*.tsx" --include="*.jsx" 2>/dev/null | wc -l)
+    
+    if [[ $responsive_classes -gt 0 ]]; then
+        jtoye_pass "Tailwind responsive classes used ($responsive_classes)"
+    fi
+fi
+
+# Check for viewport meta
+viewport=$(grep -r $JTOYE_GREP_EXCLUDE "viewport" \
+    --include="*.html" --include="layout.tsx" --include="_app.tsx" 2>/dev/null | wc -l)
+
+if [[ $viewport -gt 0 ]]; then
+    jtoye_pass "Viewport meta tag present"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+jtoye_summary $ERRORS $WARNINGS "UI/UX Accessibility Checker"
