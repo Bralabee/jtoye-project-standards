@@ -31,8 +31,8 @@ TARGET_DIR=""
 SCRIPT_SOURCE=""
 VERSION="2.1.0"
 
-# GitHub raw URL (update this when you have a repo)
-GITHUB_RAW_BASE="https://raw.githubusercontent.com/jtoye-digital/project-standards/main/.jtoye"
+# GitHub raw URL for remote installation
+GITHUB_RAW_BASE="https://raw.githubusercontent.com/Bralabee/jtoye-project-standards/main/.jtoye"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -185,7 +185,13 @@ if [[ -d "$DEST_PATH" ]] || [[ -L "$DEST_PATH" ]]; then
             exit 0
         fi
     fi
-    rm -rf "$DEST_PATH"
+    # Safety check: only remove if path ends with .jtoye
+    if [[ "$DEST_PATH" == *"/.jtoye" ]]; then
+        rm -rf "$DEST_PATH"
+    else
+        echo -e "${RED}Error: Refusing to remove unexpected path: $DEST_PATH${NC}"
+        exit 1
+    fi
 fi
 
 # Find source
