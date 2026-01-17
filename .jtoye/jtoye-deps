@@ -213,9 +213,10 @@ if [[ -f "package.json" ]]; then
                     inc WARNINGS
                 elif [[ $total_vulns -gt 0 ]]; then
                     jtoye_warn "npm audit: $total_vulns vulnerabilities (review recommended)"
-                inc WARNINGS
-            else
-                jtoye_pass "No npm audit vulnerabilities"
+                    inc WARNINGS
+                else
+                    jtoye_pass "No npm audit vulnerabilities"
+                fi
             fi
         fi
     fi

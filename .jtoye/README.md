@@ -1,18 +1,41 @@
-# J'Toye Digital Project Standards Toolkit v2.0
+# J'Toye Digital Project Standards Toolkit v2.1
 
 A comprehensive suite of project validation scripts for J'Toye Digital projects.
+
+## Prerequisites
+
+**Required**: `bash 4.3+`, `git`, `grep`, `find`
+
+**Optional** (by project type):
+- Go: `go`, `gofmt`
+- Python: `python`, `ruff`/`flake8`, `pip-audit`
+- Node.js: `npm`/`pnpm`, `eslint`
+- JSON parsing: `jq` (has fallback)
 
 ## Quick Start
 
 ```bash
-# Run full audit
-./scripts/jtoye-audit
+# Run full audit (from project root with .jtoye installed)
+./.jtoye/jtoye-audit .
 
 # Run quick audit (skip optional checks)
-./scripts/jtoye-audit --quick
+./.jtoye/jtoye-audit . --quick
 
 # Run in CI mode (stop on first required failure)
-./scripts/jtoye-audit --ci
+./.jtoye/jtoye-audit . --ci
+
+# Run in offline mode (skip network-dependent checks)
+./.jtoye/jtoye-audit . --offline
+```
+
+## Installation
+
+```bash
+# From the _project_standards directory:
+./install-jtoye.sh /path/to/your/project
+
+# Or create symlink (for projects in same workspace):
+./install-jtoye.sh --symlink /path/to/your/project
 ```
 
 ## Scripts Overview
@@ -41,25 +64,36 @@ A comprehensive suite of project validation scripts for J'Toye Digital projects.
 Each script can be run standalone:
 
 ```bash
-# Security scan
-./scripts/jtoye-security
+# Security scan (from project with .jtoye installed)
+./.jtoye/jtoye-security .
 
 # With explicit project path
-./scripts/jtoye-security /path/to/project
+./.jtoye/jtoye-security /path/to/project
 
 # Using environment variable
-JTOYE_PROJECT_ROOT=/path/to/project ./scripts/jtoye-quality
+JTOYE_PROJECT_ROOT=/path/to/project ./.jtoye/jtoye-quality .
 ```
 
-### Custom Thresholds
+## Configuration Variables
 
-Some scripts support custom thresholds via environment variables:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JTOYE_PROJECT_ROOT` | (auto-detect) | Override project root detection |
+| `JTOYE_COMMAND_TIMEOUT` | `60` | Seconds before command timeout |
+| `JTOYE_FIND_MAXDEPTH` | `15` | Max directory depth for searches |
+| `JTOYE_OFFLINE` | `false` | Skip network-dependent checks |
+| `JTOYE_GO_COVERAGE` | `60` | Go test coverage threshold % |
+| `JTOYE_PY_COVERAGE` | `50` | Python coverage threshold % |
+| `JTOYE_NODE_COVERAGE` | `40` | Node.js coverage threshold % |
+| `JTOYE_EXTRA_EXCLUDES` | (empty) | Additional paths to exclude |
+
+### Example with custom settings:
 
 ```bash
-# Coverage thresholds
-JTOYE_GO_COVERAGE_THRESHOLD=80 \
-JTOYE_PYTHON_COVERAGE_THRESHOLD=70 \
-./scripts/jtoye-coverage
+JTOYE_GO_COVERAGE=80 \
+JTOYE_PY_COVERAGE=70 \
+JTOYE_COMMAND_TIMEOUT=120 \
+./.jtoye/jtoye-coverage .
 ```
 
 ## Architecture
@@ -73,14 +107,17 @@ All scripts source the common library at `lib/jtoye-common.sh`:
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/jtoye-common.sh"
 
-PROJECT_ROOT="$(detect_project_root "${1:-}")"
+PROJECT_ROOT="$(detect_project_root "${1:-}")" || exit 1
+cd -- "$PROJECT_ROOT" || exit 1
 ```
 
 ### Features
 
+- **Strict mode**: Uses `set -euo pipefail` for robust error handling
 - **Unified exclusion patterns**: All scripts skip `node_modules`, `.venv`, `vendor`, etc.
 - **Consistent output**: Color-coded results with `jtoye_pass`, `jtoye_warn`, `jtoye_fail`
-- **Safe operations**: Uses `set -e` and safe increment patterns
+- **Timeout protection**: Commands have configurable timeouts via `run_with_timeout`
+- **Offline mode**: Skip network checks with `--offline` or `JTOYE_OFFLINE=true`
 - **Auto-detection**: Detects Go, Python, Node.js, Rust projects automatically
 
 ### Exit Codes
@@ -89,6 +126,7 @@ PROJECT_ROOT="$(detect_project_root "${1:-}")"
 |------|---------|
 | 0 | All checks passed |
 | 1 | One or more checks failed |
+| 124 | Command timed out |
 
 ## Makefile Integration
 
@@ -98,16 +136,19 @@ Add to your project's Makefile:
 .PHONY: audit audit-quick lint security
 
 audit:
-	@./scripts/jtoye-audit
+	@./.jtoye/jtoye-audit .
 
 audit-quick:
-	@./scripts/jtoye-audit --quick
+	@./.jtoye/jtoye-audit . --quick
+
+audit-ci:
+	@./.jtoye/jtoye-audit . --ci
 
 lint:
-	@./scripts/jtoye-quality
+	@./.jtoye/jtoye-quality .
 
 security:
-	@./scripts/jtoye-security
+	@./.jtoye/jtoye-security .
 ```
 
 ## CI/CD Integration
@@ -121,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run audit
-        run: ./scripts/jtoye-audit --ci
+        run: ./.jtoye/jtoye-audit . --ci
 ```
 
 ### GitLab CI
@@ -129,7 +170,7 @@ jobs:
 ```yaml
 audit:
   script:
-    - ./scripts/jtoye-audit --ci
+    - ./.jtoye/jtoye-audit . --ci
   allow_failure: false
 ```
 

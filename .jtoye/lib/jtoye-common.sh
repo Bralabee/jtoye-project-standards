@@ -141,17 +141,31 @@ fi
 # =============================================================================
 # Output Helpers
 # =============================================================================
+# Display a header banner
+# @param $1 - Title text
+# @param $2 - Optional version string (e.g., "v2.1")
 jtoye_header() {
     local title="$1"
+    local version="${2:-}"
+    local display="$title"
+    [[ -n "$version" ]] && display="$title $version"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${BLUE}  $title${NC}"
+    echo -e "${BLUE}  $display${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
 }
 
+# Display a section header
+# @param $1 - Section number or identifier (e.g., "1" or "1/6")
+# @param $2 - Optional section title (e.g., "Security Scan")
 jtoye_section() {
     local section="$1"
-    echo -e "${BLUE}[$section]${NC}"
+    local title="${2:-}"
+    if [[ -n "$title" ]]; then
+        echo -e "${BLUE}[$section] $title${NC}"
+    else
+        echo -e "${BLUE}[$section]${NC}"
+    fi
 }
 
 jtoye_pass() {
@@ -245,9 +259,11 @@ run_with_timeout() {
 }
 
 # Check if offline mode is requested
+# @param $1 - Optional description for skip message
+# @return 0 if offline (should skip), 1 if online (proceed)
 skip_if_offline() {
-    local desc="$1"
-    if [[ "$JTOYE_OFFLINE" == "true" ]]; then
+    local desc="${1:-network check}"
+    if [[ "${JTOYE_OFFLINE:-false}" == "true" ]]; then
         jtoye_skip "$desc (offline mode)"
         return 0
     fi
@@ -255,15 +271,35 @@ skip_if_offline() {
 }
 
 # JSON value extraction with jq fallback
+# Can read from file, stdin, or direct JSON string
+# @param $1 - jq query (e.g., '.dependencies | length')
+# @param $2 - Optional: filename OR JSON string (reads stdin if omitted)
+# @param $3 - Default value if extraction fails (default: 0)
 json_value() {
-    local json="$1"
-    local key="$2"
+    local query="$1"
+    local source="${2:-}"
     local default="${3:-0}"
-    if command -v jq &>/dev/null; then
-        echo "$json" | jq -r "$key // \"$default\"" 2>/dev/null || echo "$default"
+    local json_content
+    
+    # Determine source of JSON
+    if [[ -z "$source" ]]; then
+        # Read from stdin (piped)
+        json_content=$(cat)
+    elif [[ -f "$source" ]]; then
+        # Read from file
+        json_content=$(cat "$source" 2>/dev/null) || { echo "$default"; return; }
     else
-        # Crude fallback: grep for simple key:value
-        echo "$json" | grep -oE "\"${key#.}\":\s*[0-9]+" | grep -oE '[0-9]+' | head -1 || echo "$default"
+        # Assume direct JSON string
+        json_content="$source"
+    fi
+    
+    if command -v jq &>/dev/null; then
+        echo "$json_content" | jq -r "$query // \"$default\"" 2>/dev/null || echo "$default"
+    else
+        # Crude fallback: grep for simple key:value patterns
+        local simple_key="${query#.}"
+        simple_key="${simple_key%% *}"  # Take first part before space
+        echo "$json_content" | grep -oE "\"${simple_key}\":\s*[0-9]+" | grep -oE '[0-9]+' | head -1 || echo "$default"
     fi
 }
 
