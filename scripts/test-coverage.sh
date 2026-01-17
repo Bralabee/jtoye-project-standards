@@ -13,12 +13,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Source common utilities
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    # shellcheck source=lib/common.sh
+    source "$SCRIPT_DIR/lib/common.sh"
+fi
+
+# Setup help
+setup_help "Analyze test coverage across Go, Python, and Node.js services"
+add_help_option "--threshold=N  Set minimum coverage threshold (default varies by language)"
+handle_help "$@"
 
 # Thresholds (can be overridden in project-config.sh)
 GO_COVERAGE_THRESHOLD=${GO_COVERAGE_THRESHOLD:-60}

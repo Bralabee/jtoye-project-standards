@@ -4,18 +4,22 @@
 # =============================================================================
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source common utilities
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    # shellcheck source=lib/common.sh
+    source "$SCRIPT_DIR/lib/common.sh"
+fi
+
+# Setup help
+setup_help "Scan project for security vulnerabilities, hardcoded secrets, and insecure configurations"
+add_help_option "--fix    Attempt to auto-fix issues where possible (future)"
+handle_help "$@"
+
 PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 ERRORS=0
 WARNINGS=0
-
-# Exclusion flags for grep - CRITICAL for performance
-EXCL="--exclude-dir=node_modules --exclude-dir=.venv --exclude-dir=venv --exclude-dir=.git --exclude-dir=__pycache__ --exclude-dir=.next --exclude-dir=dist --exclude-dir=build --exclude-dir=vendor --exclude-dir=.cache"
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "  Security Scanner"

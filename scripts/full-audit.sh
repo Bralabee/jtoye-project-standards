@@ -5,9 +5,10 @@
 # Runs ALL validation and quality scripts in sequence.
 # This is the comprehensive health check for any project.
 #
-# Usage: ./scripts/full-audit.sh [--fix] [--ci]
-#   --fix   Attempt to auto-fix issues where possible
-#   --ci    Run in CI mode (stricter, no prompts)
+# Usage: ./scripts/full-audit.sh [--fix] [--ci] [--no-lock]
+#   --fix      Attempt to auto-fix issues where possible
+#   --ci       Run in CI mode (stricter, no prompts)
+#   --no-lock  Skip lock file (allow concurrent runs)
 # =============================================================================
 
 set -e
@@ -16,17 +17,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 STANDARDS_DIR="${PROJECT_STANDARDS_DIR:-$SCRIPT_DIR}"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-NC='\033[0m'
+# Source common utilities
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    # shellcheck source=lib/common.sh
+    source "$SCRIPT_DIR/lib/common.sh"
+else
+    echo "ERROR: common.sh not found" >&2
+    exit 1
+fi
+
+# Setup help
+setup_help "Comprehensive project health check that runs all validation and quality scripts"
+add_help_option "--fix       Attempt to auto-fix issues where possible"
+add_help_option "--ci        Run in CI mode (stricter, no prompts)"
+add_help_option "--no-lock   Skip lock file (allow concurrent runs)"
+handle_help "$@"
 
 # Options
 FIX_MODE=false
 CI_MODE=false
+NO_LOCK=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -38,11 +48,22 @@ while [[ $# -gt 0 ]]; do
             CI_MODE=true
             shift
             ;;
+        --no-lock)
+            NO_LOCK=true
+            shift
+            ;;
         *)
             shift
             ;;
     esac
 done
+
+# Acquire lock unless disabled
+if [[ "$NO_LOCK" != "true" ]]; then
+    if ! acquire_lock "full-audit"; then
+        exit 1
+    fi
+fi
 
 cd "$PROJECT_ROOT"
 

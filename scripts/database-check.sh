@@ -4,14 +4,20 @@
 # =============================================================================
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source common utilities
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    # shellcheck source=lib/common.sh
+    source "$SCRIPT_DIR/lib/common.sh"
+fi
+
+# Setup help
+setup_help "Check database migrations, schema consistency, and data integrity"
+handle_help "$@"
+
 PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 WARNINGS=0
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "  Database Schema Checker"

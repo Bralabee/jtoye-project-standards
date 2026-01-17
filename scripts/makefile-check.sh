@@ -4,16 +4,23 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source common utilities
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    # shellcheck source=lib/common.sh
+    source "$SCRIPT_DIR/lib/common.sh"
+fi
+
+# Setup help
+setup_help "Check Makefile structure and verify standard targets exist"
+add_help_option "<project_root>  Path to project root (default: current directory)"
+add_help_option "--fix           Generate missing Makefile or targets"
+handle_help "$@"
+
 PROJECT_ROOT="${1:-.}"
 PROJECT_NAME=$(basename "$(cd "$PROJECT_ROOT" && pwd)")
 REPORT_FILE="${PROJECT_ROOT}/reports/makefile-report.txt"
-
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
 
 mkdir -p "${PROJECT_ROOT}/reports"
 

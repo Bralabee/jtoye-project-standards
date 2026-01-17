@@ -64,11 +64,18 @@
 ## Usage Examples
 
 ```bash
+# Get help for any script
+./scripts/full-audit.sh --help
+./scripts/security-scan.sh -h
+
 # Run full project audit (recommended before releases)
 ./scripts/full-audit.sh
 
 # Run in CI mode (strict, fails fast)
 ./scripts/full-audit.sh --ci
+
+# Run without lock file (allow parallel execution)
+./scripts/full-audit.sh --no-lock
 
 # Individual checks by category
 ./scripts/security-scan.sh          # Security vulnerabilities
@@ -88,6 +95,51 @@
 ./scripts/release.sh minor          # 1.0.0 -> 1.1.0
 ./scripts/release.sh major          # 1.0.0 -> 2.0.0
 ./scripts/release.sh patch --dry-run # Preview changes
+```
+
+## Common Library (`lib/common.sh`)
+
+All scripts share a common library providing:
+
+### Help System
+Every script supports `--help` and `-h` flags:
+```bash
+./scripts/security-scan.sh --help
+# Shows: description, usage, options, environment variables
+```
+
+### Tool Requirements
+Consistent tool checking with three modes:
+```bash
+# In your script:
+source scripts/lib/common.sh
+
+require_tool "go" "Go compiler" "required"    # Exits if missing
+require_tool "npm" "npm" "warn"               # Warns if missing  
+require_tool "docker" "Docker" "optional"     # Silent if missing
+```
+
+### Concurrent Execution Prevention
+Lock files prevent multiple audit runs from interfering:
+```bash
+# Automatically enabled in full-audit.sh
+# Skip with: ./scripts/full-audit.sh --no-lock
+```
+
+### Bash Version Check
+Scripts require Bash 4.3+ (for associative arrays, nameref):
+```bash
+# Auto-checked on script load
+# Skip with: SKIP_BASH_CHECK=1 ./scripts/full-audit.sh
+```
+
+### Safe File Operations (Spaces in Paths)
+Properly handles filenames with spaces:
+```bash
+# Use null-delimited find for files with spaces
+safe_find_null "." "*.py" "f" | while IFS= read -r -d '' file; do
+    echo "Processing: $file"
+done
 ```
 
 ## Detailed Script Documentation
